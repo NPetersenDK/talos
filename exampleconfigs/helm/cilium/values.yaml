@@ -1,0 +1,50 @@
+# Cilium values for Talos on VMware
+# kube-proxy replacement mode — Cilium handles all service traffic via eBPF
+# BGP control plane enabled for external route advertisement
+
+ipam:
+  mode: kubernetes
+
+# Replace kube-proxy entirely (Talos sets cluster.proxy.disabled: true)
+kubeProxyReplacement: true
+
+# ESXi 8.0U2 VMXNET3 fails HW offload on non-standard VXLAN ports — use IANA standard
+tunnelPort: 4789
+
+# Required on Talos with kubeProxyReplacement enabled
+socketLB:
+  hostNamespaceOnly: true
+
+# KubePrism — Talos internal API server proxy, enabled by default on v1.8+
+k8sServiceHost: localhost
+k8sServicePort: 7445
+
+# BGP control plane (configure peers via CiliumBGPClusterConfig CRDs after install)
+bgpControlPlane:
+  enabled: true
+
+# Required on Talos: cgroup v2 is already mounted by Talos, do not auto-mount
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+
+# Required on Talos: SYS_MODULE cannot be loaded by Kubernetes workloads
+securityContext:
+  capabilities:
+    ciliumAgent:
+      - CHOWN
+      - KILL
+      - NET_ADMIN
+      - NET_RAW
+      - IPC_LOCK
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    cleanCiliumState:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_RESOURCE

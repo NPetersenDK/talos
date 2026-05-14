@@ -1,0 +1,71 @@
+# BGP cluster config - defines the local ASN and which router to peer with.
+# All nodes with the label bgp-policy=default will participate.
+# Apply with: kubectl label nodes --all bgp-policy=default
+apiVersion: cilium.io/v2
+kind: CiliumBGPClusterConfig
+metadata:
+  name: cilium-bgp
+spec:
+  nodeSelector:
+    matchLabels:
+      bgp-policy: default
+  bgpInstances:
+  - name: "instance-<LOCAL_ASN>"
+    localASN: <LOCAL_ASN>        # ASN assigned to your Kubernetes nodes (e.g. 65021)
+    peers:
+    - name: "<ROUTER_NAME>"
+      peerASN: <ROUTER_ASN>      # ASN of your router (e.g. 65000)
+      peerAddress: <ROUTER_IP>   # IP of your router on the node network (e.g. 10.0.16.1)
+      peerConfigRef:
+        name: "cilium-peer"
+---
+# BGP peer config - timers and address families. Usually no changes needed.
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: cilium-peer
+spec:
+  timers:
+    holdTimeSeconds: 9
+    keepAliveTimeSeconds: 3
+  gracefulRestart:
+    enabled: true
+    restartTimeSeconds: 15
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          advertise: "bgp"
+---
+# BGP advertisement - advertises LoadBalancer IPs for services labelled bgp-announce=true.
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: pod-ip-pool-advert
+  labels:
+    advertise: bgp
+spec:
+  advertisements:
+    - advertisementType: "Service"
+      service:
+        addresses:
+          - LoadBalancerIP
+      selector:
+        matchExpressions:
+          - { key: bgp-announce, operator: In, values: [ "true" ] }
+---
+# LoadBalancer IP pool - the CIDR Cilium will hand out as external IPs.
+# Must be a range your router will accept BGP routes for.
+apiVersion: "cilium.io/v2"
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: "lb-pool"
+  labels:
+    advertise: "bgp"
+spec:
+  blocks:
+  - cidr: "<LB_CIDR>"        
+  serviceSelector:
+    matchLabels:
+      bgp: "pool-a"

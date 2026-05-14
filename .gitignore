@@ -1,0 +1,13 @@
+# Generated machine configs — store in talos-configs (private repo)
+controlplane.yaml
+worker.yaml
+
+# Cluster credentials — store in talos-configs (private repo)
+kubeconfig
+talosconfig
+
+# Site-specific deployment config — store in talos-configs (private repo)
+powershell/environment.yaml
+
+# Network device and BGP manifests — store in talos-configs (private repo)
+Network-Configs/

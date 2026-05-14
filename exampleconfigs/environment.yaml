@@ -1,0 +1,61 @@
+vcenter:
+  server: vcsa01.example.local
+
+vmware:
+  folder: TALOS
+  locations:
+    mylocation:
+      datastore: your-datastore
+      cluster: your-cluster
+      portgroup: your-portgroup
+
+library:
+  name: TALOS
+
+schematic:
+  id: your-schematic-id-from-factory.talos.dev
+  version: v1.13.2
+
+cluster:
+  network:
+    gateway: 10.13.37.1
+    nameservers:
+      - 10.13.37.1
+    subnetPrefix: 24
+
+  controlplane:
+    cpu: 4
+    memoryGB: 8
+    diskGB: 50
+    configPath: controlplane.yaml
+    nodes:
+      - hostname: talos-cp-1
+        ip: 10.13.37.11
+        location: mylocation
+      - hostname: talos-cp-2
+        ip: 10.13.37.12
+        location: mylocation
+      - hostname: talos-cp-3
+        ip: 10.13.37.13
+        location: mylocation
+
+  worker:
+    cpu: 4
+    memoryGB: 8
+    diskGB: 100
+    configPath: worker.yaml
+    nodes:
+      - hostname: talos-worker-1
+        ip: 10.13.37.21
+        location: mylocation
+      - hostname: talos-worker-2
+        ip: 10.13.37.22
+        location: mylocation
+      - hostname: talos-worker-3
+        ip: 10.13.37.23
+        location: mylocation
+
+talos:
+  vip: 10.13.37.10
+  talosConfigPath: talosconfig
+  kubeconfigPath: kubeconfig

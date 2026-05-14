@@ -1,0 +1,64 @@
+apiVersion: cilium.io/v2
+kind: CiliumBGPClusterConfig
+metadata:
+  name: cilium-bgp
+spec:
+  nodeSelector:
+    matchLabels:
+      bgp-policy: default
+  bgpInstances:
+  - name: "instance-65021"
+    localASN: <KUBE_NODE_ASN>
+    peers:
+    - name: "UDM-PRO"
+      peerASN: <ROUTER_ASN>
+      peerAddress: <ROUTER_IP>
+      peerConfigRef:
+        name: "cilium-peer"
+---
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: cilium-peer
+spec:
+  timers:
+    holdTimeSeconds: 9
+    keepAliveTimeSeconds: 3
+  gracefulRestart:
+    enabled: true
+    restartTimeSeconds: 15
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          advertise: "bgp"
+---
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: pod-ip-pool-advert
+  labels:
+    advertise: bgp
+spec:
+  advertisements:
+    - advertisementType: "Service"
+      service:
+        addresses:
+          - LoadBalancerIP
+      selector:
+        matchExpressions:
+          - { key: bgp-announce, operator: In, values: [ "true" ] }
+---
+apiVersion: "cilium.io/v2"
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: "lb-pool"
+  labels:
+    advertise: "bgp"
+spec:
+  blocks:
+  - cidr: "<LB_POOL_CIDR>"
+  serviceSelector:
+    matchLabels:
+      bgp: "<LB_POOL_LABEL>"

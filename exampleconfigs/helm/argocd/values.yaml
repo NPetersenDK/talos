@@ -1,0 +1,10 @@
+# ArgoCD Helm values for Talos
+# Repo: https://argoproj.github.io/argo-helm (chart: argo-cd)
+
+server:
+  service:
+    type: LoadBalancer
+    externalTrafficPolicy: Local
+    labels:
+      bgp-announce: "true"
+      bgp: pool-a
