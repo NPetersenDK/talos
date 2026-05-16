@@ -7,37 +7,53 @@ param(
 Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
 
 $ConfigsPath = Resolve-Path $ConfigsPath
-$env = Get-TalosEnvironment -Path (Join-Path $ConfigsPath "environment.yaml")
+if (Test-Path $ConfigsPath -PathType Leaf) {
+    $ConfigsPath = Split-Path $ConfigsPath -Parent
+}
+$config = Get-TalosEnvironment -Path (Join-Path $ConfigsPath "environment.yaml")
 
-Connect-TalosVCenter -Server $env.vcenter.server
+Write-TalosBanner "Upload Talos OVA"
 
-# Get or create content library
-$library = Get-ContentLibrary -Name $env.library.name -Local -ErrorAction SilentlyContinue
+# ─── Connect to vCenter ──────────────────────────────────────────────────────
+Write-TalosStep 1 "Connecting to vCenter"
+Connect-TalosVCenter -Server $config.vcenter.server
+Write-TalosSuccess "Connected to $($config.vcenter.server)"
+
+# ─── Get or create content library ───────────────────────────────────────────
+Write-TalosStep 2 "Checking content library"
+
+$library = Get-ContentLibrary -Name $config.library.name -Local -ErrorAction SilentlyContinue
 if (-not $library) {
-    Write-Host "Creating content library: $($env.library.name)"
-    $ds = Get-Datastore -Name $env.vmware.datastore
-    $library = New-ContentLibrary -Name $env.library.name -Datastore $ds
+    Write-TalosInfo "Creating content library: $($config.library.name)"
+    $ds = Get-Datastore -Name $config.vmware.datastore
+    $library = New-ContentLibrary -Name $config.library.name -Datastore $ds
+    Write-TalosSuccess "Created library: $($config.library.name)"
 } else {
-    Write-Host "Content library '$($env.library.name)' already exists"
+    Write-TalosSuccess "Library exists: $($config.library.name)"
 }
 
-# Check if this version already exists
-$itemName = $env.schematic.libraryItemName
+# ─── Check / upload OVA ──────────────────────────────────────────────────────
+Write-TalosStep 3 "Uploading OVA image"
+
+$itemName = $config.schematic.libraryItemName
+Write-TalosInfo "Item name: $itemName"
+Write-TalosInfo "OVA URL:   $($config.schematic.ovaUrl)"
+
 $existingItem = Get-ContentLibraryItem -ContentLibrary $library -Name $itemName -ErrorAction SilentlyContinue
 
 if ($existingItem) {
-    Write-Host "Library item '$itemName' already exists — skipping upload"
+    Write-TalosWarn "Library item '$itemName' already exists — skipping upload"
 } else {
     $tempPath = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "$itemName.ova")
 
-    Write-Host "Downloading OVA for $itemName ..."
+    Write-TalosInfo "Downloading OVA..."
     try {
         $curlPath = (Get-Command curl -ErrorAction SilentlyContinue)?.Source
         if ($curlPath) {
-            & $curlPath -L --fail -o $tempPath $env.schematic.ovaUrl
+            & $curlPath -L --fail -o $tempPath $config.schematic.ovaUrl
             if ($LASTEXITCODE -ne 0) { throw "curl exited with code $LASTEXITCODE" }
         } else {
-            Invoke-WebRequest -Uri $env.schematic.ovaUrl -OutFile $tempPath 
+            Invoke-WebRequest -Uri $config.schematic.ovaUrl -OutFile $tempPath
         }
     } catch {
         Write-Error "Failed to download OVA: $_"
@@ -49,11 +65,19 @@ if ($existingItem) {
         exit 1
     }
 
-    Write-Host "Importing OVA into library '$($env.library.name)' as '$itemName' ..."
+    Write-TalosInfo "Importing into library..."
     New-ContentLibraryItem -ContentLibrary $library -Name $itemName -Files $tempPath
+    Write-TalosSuccess "Imported as '$itemName'"
 
     Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Temporary OVA file removed"
+    Write-TalosInfo "Temp file cleaned up"
 }
 
-Write-Host "Done. Library item '$itemName' is ready in '$($env.library.name)'."
+# ─── Summary ─────────────────────────────────────────────────────────────────
+Write-TalosSummary "OVA Ready" @(
+    "Library:  $($config.library.name)",
+    "Item:     $itemName",
+    "Version:  $($config.schematic.version)",
+    "",
+    "Next: Deploy-TalosCluster.ps1"
+)

@@ -7,80 +7,19 @@ param(
 Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
 
 $ConfigsPath = Resolve-Path $ConfigsPath
-$env = Get-TalosEnvironment -Path (Join-Path $ConfigsPath "environment.yaml")
-
-Connect-TalosVCenter -Server $env.vcenter.server
-
-function New-NodeConfig {
-    param(
-        [string]$BaseConfigPath,
-        [string]$Hostname,
-        [string]$IP,
-        [string]$SubnetPrefix,
-        [string]$Gateway,
-        [string[]]$Nameservers,
-        [string]$VIP = $null
-    )
-
-    $iface = @{
-        interface = "eth0"
-        dhcp      = $false
-        mtu       = 9000
-        addresses = @("$IP/$SubnetPrefix")
-        routes    = @(
-            @{
-                network = "0.0.0.0/0"
-                gateway = $Gateway
-            }
-        )
-    }
-
-    if ($VIP) {
-        $iface.vip = @{ ip = $VIP }
-    }
-
-    $patch = @{
-        machine = @{
-            network = @{
-                interfaces  = @($iface)
-                nameservers = $Nameservers
-            }
-        }
-        cluster = @{
-            network = @{
-                cni = @{ name = "none" }
-            }
-            proxy = @{ disabled = $true }
-        }
-    }
-
-    $hostnameConfig = @{
-        apiVersion = "v1alpha1"
-        kind       = "HostnameConfig"
-        hostname   = $Hostname
-        auto       = "off"
-    }
-
-    $tempPatch = [System.IO.Path]::GetTempFileName() + ".yaml"
-    $tempOut   = [System.IO.Path]::GetTempFileName() + ".yaml"
-
-    $yaml  = ($patch | ConvertTo-Yaml)
-    $yaml += "`n---`n"
-    $yaml += ($hostnameConfig | ConvertTo-Yaml)
-    $yaml | Set-Content -Path $tempPatch -Encoding UTF8
-
-    & talosctl machineconfig patch $BaseConfigPath `
-        --patch "@$tempPatch" `
-        --output $tempOut
-
-    Remove-Item $tempPatch -Force -ErrorAction SilentlyContinue
-
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tempOut)) {
-        throw "Failed to generate node config for $Hostname"
-    }
-
-    return $tempOut
+if (Test-Path $ConfigsPath -PathType Leaf) {
+    $ConfigsPath = Split-Path $ConfigsPath -Parent
 }
+$config = Get-TalosEnvironment -Path (Join-Path $ConfigsPath "environment.yaml")
+
+Write-TalosBanner "Deploy Talos Cluster"
+
+# ─── Connect to vCenter ──────────────────────────────────────────────────────
+Write-TalosStep 1 "Connecting to vCenter"
+Connect-TalosVCenter -Server $config.vcenter.server
+Write-TalosSuccess "Connected to $($config.vcenter.server)"
+
+# ─── Helper functions ────────────────────────────────────────────────────────
 
 function Deploy-TalosVM {
     param(
@@ -99,18 +38,17 @@ function Deploy-TalosVM {
     $configBytes = [System.IO.File]::ReadAllBytes((Resolve-Path $ConfigPath))
     $configBase64 = [Convert]::ToBase64String($configBytes)
 
-    Write-Host "  Creating VM: $VMName"
+    Write-TalosInfo "Creating VM: $VMName"
     $vm = New-VM -Name $VMName `
         -ContentLibraryItem $LibraryItem `
         -ResourcePool $TargetCluster `
         -Datastore $TargetDatastore `
         -DiskStorageFormat Thin
 
-    Write-Host "  Setting resources: $NumCpu vCPU, ${MemoryGB} GB RAM"
+    Write-TalosInfo "Setting resources: $NumCpu vCPU, ${MemoryGB} GB RAM, ${DiskGB} GB disk"
     Set-VM -VM $vm -NumCpu $NumCpu -MemoryGB $MemoryGB -Confirm:$false | Out-Null
 
     $disk = Get-HardDisk -VM $vm | Select-Object -First 1
-    Write-Host "  Configuring disk: ${DiskGB} GB thin provisioned"
     Set-HardDisk -HardDisk $disk -CapacityGB $DiskGB -Confirm:$false | Out-Null
 
     $nic = Get-NetworkAdapter -VM $vm | Select-Object -First 1
@@ -123,11 +61,11 @@ function Deploy-TalosVM {
         }
     }
 
-    Write-Host "  Injecting machine config via guestinfo"
+    Write-TalosInfo "Injecting machine config via guestinfo"
     New-AdvancedSetting -Entity $vm -Name "guestinfo.talos.config" -Value $configBase64 -Force -Confirm:$false | Out-Null
     New-AdvancedSetting -Entity $vm -Name "disk.enableUUID" -Value "TRUE" -Force -Confirm:$false | Out-Null
 
-    Write-Host "  Powering on $VMName"
+    Write-TalosInfo "Powering on $VMName"
     Start-VM -VM $vm | Out-Null
 
     if ($TargetFolder) {
@@ -137,44 +75,54 @@ function Deploy-TalosVM {
     return $vm
 }
 
-# Resolve base config paths
-$cpConfigPath     = Join-Path $ConfigsPath $env.cluster.controlplane.configPath
-$workerConfigPath = Join-Path $ConfigsPath $env.cluster.worker.configPath
+# ─── Validate configs ────────────────────────────────────────────────────────
+Write-TalosStep 2 "Validating machine configs"
 
-if (-not (Test-Path $cpConfigPath)) {
-    Write-Error "Control plane config not found: $cpConfigPath`nRun 'talosctl gen config' first (see README Step 2)"
-    exit 1
-}
-if (-not (Test-Path $workerConfigPath)) {
-    Write-Error "Worker config not found: $workerConfigPath`nRun 'talosctl gen config' first (see README Step 2)"
+$machineDir = Join-Path $ConfigsPath "talosfiles" "machineconfigs"
+if (-not (Test-Path $machineDir)) {
+    Write-Error "Machine configs not found: $machineDir`nRun Initialize-TalosConfig.ps1 first"
     exit 1
 }
 
-$library   = Get-ContentLibrary -Name $env.library.name -Local
-$item      = Get-ContentLibraryItem -ContentLibrary $library -Name $env.schematic.libraryItemName
+$allNodes = @(
+    $config.cluster.controlplane.nodes
+    $config.cluster.worker.nodes
+)
+foreach ($node in $allNodes) {
+    $nodeCfg = Join-Path $machineDir "$($node.hostname).yaml"
+    if (-not (Test-Path $nodeCfg)) {
+        Write-Error "Missing config: $nodeCfg`nRun Initialize-TalosConfig.ps1 first"
+        exit 1
+    }
+    Write-TalosSuccess "$($node.hostname).yaml"
+}
 
-# Ensure VM folder exists
+# ─── Resolve vSphere resources ───────────────────────────────────────────────
+Write-TalosStep 3 "Resolving vSphere resources"
+
+$library = Get-ContentLibrary -Name $config.library.name -Local
+$item    = Get-ContentLibraryItem -ContentLibrary $library -Name $config.schematic.libraryItemName
+Write-TalosSuccess "Library item: $($config.schematic.libraryItemName)"
+
 $vmFolder = $null
-if ($env.vmware.folder) {
-    $vmFolder = Get-Folder -Name $env.vmware.folder -Type VM -ErrorAction SilentlyContinue
+if ($config.vmware.folder) {
+    $vmFolder = Get-Folder -Name $config.vmware.folder -Type VM -ErrorAction SilentlyContinue
     if (-not $vmFolder) {
-        Write-Host "Creating VM folder: $($env.vmware.folder)"
         $rootFolder = Get-Folder -Name 'vm' -Type VM | Select-Object -First 1
-        $vmFolder = New-Folder -Name $env.vmware.folder -Location $rootFolder
+        $vmFolder = New-Folder -Name $config.vmware.folder -Location $rootFolder
+        Write-TalosSuccess "Created VM folder: $($config.vmware.folder)"
     } else {
-        Write-Host "VM folder already exists: $($env.vmware.folder)"
+        Write-TalosSuccess "VM folder: $($config.vmware.folder)"
     }
 }
 
-$net         = $env.cluster.network
-$nameservers = @($net.nameservers)
 $createdVMs  = @()
 $locationCache = @{}
 
 function Get-ClusterLocation {
     param([string]$Key)
     if (-not $locationCache.ContainsKey($Key)) {
-        $loc = $env.vmware.locations.$Key
+        $loc = $config.vmware.locations.$Key
         if (-not $loc) { throw "Unknown location key: '$Key'" }
         $locationCache[$Key] = @{
             Cluster   = Get-Cluster   -Name $loc.cluster
@@ -185,88 +133,70 @@ function Get-ClusterLocation {
     return $locationCache[$Key]
 }
 
-# Pre-flight: check no VMs already exist
-Write-Host "`nChecking for existing VMs..."
+# ─── Pre-flight check ────────────────────────────────────────────────────────
+Write-TalosStep 4 "Pre-flight check"
+
 $allHostnames = @(
-    ($env.cluster.controlplane.nodes | ForEach-Object { $_.hostname })
-    ($env.cluster.worker.nodes       | ForEach-Object { $_.hostname })
+    ($config.cluster.controlplane.nodes | ForEach-Object { $_.hostname })
+    ($config.cluster.worker.nodes       | ForEach-Object { $_.hostname })
 )
 $existing = $allHostnames | Where-Object { Get-VM -Name $_ -ErrorAction SilentlyContinue }
 if ($existing) {
     Write-Error "The following VMs already exist — remove them before redeploying:`n  $($existing -join "`n  ")"
     exit 1
 }
-Write-Host "  All clear — no existing VMs found"
+Write-TalosSuccess "No conflicting VMs found"
 
-# Deploy control plane nodes
-Write-Host "`n--- Control Plane Nodes ---"
-$cp = $env.cluster.controlplane
+# ─── Deploy control plane ────────────────────────────────────────────────────
+Write-TalosStep 5 "Deploying control plane nodes"
+
+$cp = $config.cluster.controlplane
 foreach ($node in $cp.nodes) {
-    $vmName = $node.hostname
-    $loc    = Get-ClusterLocation -Key $node.location
+    $vmName     = $node.hostname
+    $loc        = Get-ClusterLocation -Key $node.location
+    $nodeConfig = Join-Path $machineDir "$($node.hostname).yaml"
 
-    Write-Host "`n[$vmName] hostname=$($node.hostname) ip=$($node.ip) location=$($node.location)"
+    Write-Host ""
+    Write-TalosInfo "$vmName  ip=$($node.ip)  location=$($node.location)"
 
-    $nodeConfig = New-NodeConfig `
-        -BaseConfigPath $cpConfigPath `
-        -Hostname $node.hostname `
-        -IP $node.ip `
-        -SubnetPrefix $net.subnetPrefix `
-        -Gateway $net.gateway `
-        -Nameservers $nameservers `
-        -VIP $env.talos.vip
+    Deploy-TalosVM -VMName $vmName `
+        -ConfigPath $nodeConfig `
+        -NumCpu $cp.cpu -MemoryGB $cp.memoryGB -DiskGB $cp.diskGB `
+        -PortGroup $loc.PortGroup `
+        -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore `
+        -TargetFolder $vmFolder
 
-    try {
-        Deploy-TalosVM -VMName $vmName `
-            -ConfigPath $nodeConfig `
-            -NumCpu $cp.cpu -MemoryGB $cp.memoryGB -DiskGB $cp.diskGB `
-            -PortGroup $loc.PortGroup `
-            -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore `
-            -TargetFolder $vmFolder
-    } finally {
-        Remove-Item $nodeConfig -Force -ErrorAction SilentlyContinue
-    }
-
+    Write-TalosSuccess "$vmName deployed"
     $createdVMs += "$vmName ($($node.ip))"
 }
 
-# Deploy worker nodes
-Write-Host "`n--- Worker Nodes ---"
-$w = $env.cluster.worker
+# ─── Deploy workers ──────────────────────────────────────────────────────────
+Write-TalosStep 6 "Deploying worker nodes"
+
+$w = $config.cluster.worker
 foreach ($node in $w.nodes) {
-    $vmName = $node.hostname
-    $loc    = Get-ClusterLocation -Key $node.location
+    $vmName     = $node.hostname
+    $loc        = Get-ClusterLocation -Key $node.location
+    $nodeConfig = Join-Path $machineDir "$($node.hostname).yaml"
 
-    Write-Host "`n[$vmName] hostname=$($node.hostname) ip=$($node.ip) location=$($node.location)"
+    Write-Host ""
+    Write-TalosInfo "$vmName  ip=$($node.ip)  location=$($node.location)"
 
-    $nodeConfig = New-NodeConfig `
-        -BaseConfigPath $workerConfigPath `
-        -Hostname $node.hostname `
-        -IP $node.ip `
-        -SubnetPrefix $net.subnetPrefix `
-        -Gateway $net.gateway `
-        -Nameservers $nameservers
+    Deploy-TalosVM -VMName $vmName `
+        -ConfigPath $nodeConfig `
+        -NumCpu $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB `
+        -PortGroup $loc.PortGroup `
+        -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore `
+        -TargetFolder $vmFolder
 
-    try {
-        Deploy-TalosVM -VMName $vmName `
-            -ConfigPath $nodeConfig `
-            -NumCpu $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB `
-            -PortGroup $loc.PortGroup `
-            -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore `
-            -TargetFolder $vmFolder
-    } finally {
-        Remove-Item $nodeConfig -Force -ErrorAction SilentlyContinue
-    }
-
+    Write-TalosSuccess "$vmName deployed"
     $createdVMs += "$vmName ($($node.ip))"
 }
 
-# Summary
-Write-Host "`n========================================="
-Write-Host "Cluster VMs created and powered on:"
-$createdVMs | ForEach-Object { Write-Host "  - $_" }
-Write-Host ""
-Write-Host "Next steps:"
-Write-Host "  1. Wait for control plane nodes to boot (watch VM consoles)"
-Write-Host "  2. Run Bootstrap-TalosCluster.ps1 to bootstrap the cluster"
-Write-Host "========================================="
+# ─── Summary ─────────────────────────────────────────────────────────────────
+$summaryLines = @("VMs created and powered on:")
+$summaryLines += $createdVMs | ForEach-Object { "  $_" }
+$summaryLines += ""
+$summaryLines += "Next: Bootstrap-TalosCluster.ps1"
+
+Write-TalosSummary "Cluster Deployed" $summaryLines

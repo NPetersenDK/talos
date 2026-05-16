@@ -4,6 +4,16 @@
     GUID              = 'b3f7a2c1-8d4e-4f6a-9c1b-5e2d3f4a6b8c'
     Author            = 'Talos VMware Automation'
     Description       = 'Helper module for Talos Linux VMware deployments'
-    RequiredModules   = @('powershell-yaml', 'VCF.PowerCLI')
-    FunctionsToExport = @('Get-TalosEnvironment', 'Connect-TalosVCenter')
+    RequiredModules   = @('powershell-yaml')
+    FunctionsToExport = @(
+        'Get-TalosEnvironment',
+        'Connect-TalosVCenter',
+        'New-TalosNodeConfig',
+        'Write-TalosBanner',
+        'Write-TalosStep',
+        'Write-TalosSuccess',
+        'Write-TalosWarn',
+        'Write-TalosInfo',
+        'Write-TalosSummary'
+    )
 }

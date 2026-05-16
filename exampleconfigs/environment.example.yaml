@@ -17,6 +17,7 @@ schematic:
   version: v1.13.2
 
 cluster:
+  name: my-cluster
   network:
     gateway: 10.13.37.1
     nameservers:
@@ -27,7 +28,7 @@ cluster:
     cpu: 4
     memoryGB: 8
     diskGB: 50
-    configPath: controlplane.yaml
+    configPath: talosfiles/controlplane.yaml
     nodes:
       - hostname: talos-cp-1
         ip: 10.13.37.11
@@ -43,7 +44,7 @@ cluster:
     cpu: 4
     memoryGB: 8
     diskGB: 100
-    configPath: worker.yaml
+    configPath: talosfiles/worker.yaml
     nodes:
       - hostname: talos-worker-1
         ip: 10.13.37.21
@@ -57,5 +58,5 @@ cluster:
 
 talos:
   vip: 10.13.37.10
-  talosConfigPath: talosconfig
-  kubeconfigPath: kubeconfig
+  talosConfigPath: talosfiles/talosconfig
+  kubeconfigPath: talosfiles/kubeconfig

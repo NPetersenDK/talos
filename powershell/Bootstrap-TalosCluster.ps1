@@ -7,38 +7,49 @@ param(
 Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
 
 $ConfigsPath = Resolve-Path $ConfigsPath
-$env = Get-TalosEnvironment -Path (Join-Path $ConfigsPath "environment.yaml")
+if (Test-Path $ConfigsPath -PathType Leaf) {
+    $ConfigsPath = Split-Path $ConfigsPath -Parent
+}
+$config = Get-TalosEnvironment -Path (Join-Path $ConfigsPath "environment.yaml")
 
-$talosConfig  = Resolve-Path (Join-Path $ConfigsPath $env.talos.talosConfigPath)
-$kubeconfigOut = Join-Path $ConfigsPath $env.talos.kubeconfigPath
+Write-TalosBanner "Bootstrap Talos Cluster"
 
-# Collect control plane IPs directly from environment.yaml
-$cpNodes = $env.cluster.controlplane.nodes
-$cpIPs   = $cpNodes | ForEach-Object { $_.ip }
+$talosConfig   = Resolve-Path (Join-Path $ConfigsPath $config.talos.talosConfigPath)
+$kubeconfigOut = Join-Path $ConfigsPath $config.talos.kubeconfigPath
 
-# ─── Wait for Talos API on all CP nodes (port 50000) ─────────────────────────
-Write-Host "`nWaiting for Talos API (port 50000) on all control plane nodes..."
+$cpNodes = @($config.cluster.controlplane.nodes)
+$cpIPs   = @($cpNodes | ForEach-Object { $_.ip })
+
+# ─── Wait for Talos API ──────────────────────────────────────────────────────
+Write-TalosStep 1 "Waiting for Talos API (port 50000)"
+
 $timeout = 600
 foreach ($node in $cpNodes) {
     $elapsed = 0
     while ($true) {
         $result = Test-Connection -TargetName $node.ip -TcpPort 50000 -TimeoutSeconds 3 -ErrorAction SilentlyContinue
         if ($result) {
-            Write-Host "  $($node.hostname) ($($node.ip)) Talos API ready"
+            Write-TalosSuccess "$($node.hostname) ($($node.ip)) ready"
             break
         }
         if ($elapsed -ge $timeout) {
             Write-Error "Timed out waiting for Talos API on $($node.hostname) ($($node.ip))"
             exit 1
         }
+        if ($elapsed % 30 -eq 0 -and $elapsed -gt 0) {
+            Write-TalosInfo "Still waiting for $($node.hostname)... (${elapsed}s)"
+        }
         Start-Sleep -Seconds 10
         $elapsed += 10
     }
 }
 
-# ─── Bootstrap etcd on cp-1 ──────────────────────────────────────────────────
+# ─── Bootstrap etcd ──────────────────────────────────────────────────────────
+Write-TalosStep 2 "Bootstrapping etcd on $($cpNodes[0].hostname)"
+
 $bootstrapIP = $cpIPs[0]
-Write-Host "`nBootstrapping etcd on $($cpNodes[0].hostname) ($bootstrapIP)..."
+Write-TalosInfo "Target: $bootstrapIP"
+
 $bootstrapOutput = & talosctl bootstrap `
     --talosconfig $talosConfig `
     --endpoints $bootstrapIP `
@@ -46,15 +57,18 @@ $bootstrapOutput = & talosctl bootstrap `
 
 if ($LASTEXITCODE -ne 0) {
     if ($bootstrapOutput -match 'AlreadyExists') {
-        Write-Host "  etcd already bootstrapped — continuing"
+        Write-TalosWarn "etcd already bootstrapped — continuing"
     } else {
         Write-Error "talosctl bootstrap failed: $bootstrapOutput"
         exit 1
     }
+} else {
+    Write-TalosSuccess "etcd bootstrap initiated"
 }
 
-# ─── Wait for all members to join ────────────────────────────────────────────
-Write-Host "`nWaiting for all $($cpNodes.Count) control plane nodes to join etcd..."
+# ─── Wait for quorum ─────────────────────────────────────────────────────────
+Write-TalosStep 3 "Waiting for etcd quorum ($($cpNodes.Count) members)"
+
 $elapsed = 0
 while ($true) {
     $rawOutput = & talosctl get members `
@@ -77,9 +91,12 @@ while ($true) {
     }
 
     $cpMembers = $members | Where-Object { $_.spec.machineType -eq 'controlplane' -or $_.spec.type -eq 'controlplane' }
-    Write-Host "  $($cpMembers.Count)/$($cpNodes.Count) control plane members ready"
+    Write-TalosInfo "$($cpMembers.Count)/$($cpNodes.Count) control plane members joined"
 
-    if ($cpMembers.Count -ge $cpNodes.Count) { break }
+    if ($cpMembers.Count -ge $cpNodes.Count) {
+        Write-TalosSuccess "All control plane members joined"
+        break
+    }
 
     if ($elapsed -ge $timeout) {
         Write-Error "Timed out waiting for etcd quorum"
@@ -89,8 +106,17 @@ while ($true) {
     $elapsed += 10
 }
 
+# ─── Configure talosconfig ───────────────────────────────────────────────────
+Write-TalosStep 4 "Configuring talosconfig endpoints"
+
+& talosctl config endpoint $config.talos.vip --talosconfig $talosConfig
+& talosctl config node @cpIPs --talosconfig $talosConfig
+Write-TalosSuccess "Endpoint: $($config.talos.vip)"
+Write-TalosInfo "Nodes: $($cpIPs -join ', ')"
+
 # ─── Retrieve kubeconfig ─────────────────────────────────────────────────────
-Write-Host "`nRetrieving kubeconfig..."
+Write-TalosStep 5 "Retrieving kubeconfig"
+
 & talosctl kubeconfig $kubeconfigOut `
     --talosconfig $talosConfig `
     --endpoints $bootstrapIP `
@@ -101,19 +127,18 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "Failed to retrieve kubeconfig (exit $LASTEXITCODE)"
     exit 1
 }
+Write-TalosSuccess "Saved to $kubeconfigOut"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
-Write-Host "`n========================================="
-Write-Host "Cluster bootstrapped successfully!"
-Write-Host ""
-Write-Host "Control plane IPs:"
+$summaryLines = @("Control plane:")
 $cpNodes | ForEach-Object {
-    Write-Host "  $($_.hostname) -> $($_.ip)"
+    $summaryLines += "  $($_.hostname) -> $($_.ip)"
 }
-Write-Host ""
-Write-Host "VIP: $($env.talos.vip)"
-Write-Host ""
-Write-Host "To access the cluster:"
-Write-Host "  `$env:KUBECONFIG = '$kubeconfigOut'"
-Write-Host "  kubectl get nodes"
-Write-Host "========================================="
+$summaryLines += ""
+$summaryLines += "VIP: $($config.talos.vip)"
+$summaryLines += ""
+$summaryLines += "Access the cluster:"
+$summaryLines += "  `$env:KUBECONFIG = '$kubeconfigOut'"
+$summaryLines += "  kubectl get nodes"
+
+Write-TalosSummary "Cluster Bootstrapped" $summaryLines
