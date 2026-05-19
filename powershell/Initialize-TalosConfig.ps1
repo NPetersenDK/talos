@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)]
     [string]$ConfigsPath,
 
-    [switch]$Force
+    [switch]$Force,
+    [switch]$RegenBase
 )
 
 Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
@@ -31,17 +32,40 @@ Write-TalosStep 2 "Preparing output directory"
 
 $outputDir = Join-Path $ConfigsPath "talosfiles"
 
+# Backup existing configurations before they are touched
 if (Test-Path $outputDir) {
-    $existing = Get-ChildItem $outputDir -File
-    if ($existing -and -not $Force) {
-        Write-TalosWarn "talosfiles/ already contains files:"
-        $existing | ForEach-Object { Write-TalosInfo $_.Name }
-        Write-Host ""
-        Write-Error "Use -Force to overwrite existing configs"
-        exit 1
+    $backupRoot = Join-Path $outputDir "backups"
+    $filesToBackup = Get-ChildItem -Path $outputDir -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "backups" }
+    if ($filesToBackup) {
+        $timestamp = (Get-Date -Format "yyyyMMdd_HHmmss")
+        $backupDir = Join-Path $backupRoot $timestamp
+        try {
+            New-Item -ItemType Directory -Path $backupDir -Force -ErrorAction Stop | Out-Null
+            Write-TalosInfo "Backing up existing configurations to: $backupDir"
+            foreach ($item in $filesToBackup) {
+                Copy-Item -Path $item.FullName -Destination $backupDir -Recurse -Force -ErrorAction Stop
+            }
+            Write-TalosSuccess "Backup created successfully"
+        } catch {
+            Write-Error "Failed to create backup: $_"
+            exit 1
+        }
     }
-    if ($existing -and $Force) {
-        Write-TalosWarn "Overwriting existing configs (-Force)"
+}
+
+$cpConfigPath  = Join-Path $outputDir "controlplane.yaml"
+$wkConfigPath  = Join-Path $outputDir "worker.yaml"
+
+$hasBaseConfigs = (Test-Path $cpConfigPath) -and (Test-Path $wkConfigPath)
+
+if (Test-Path $outputDir) {
+    if ($hasBaseConfigs -and -not $RegenBase -and -not $Force) {
+        Write-TalosInfo "Found existing base configs (controlplane.yaml and worker.yaml)."
+        Write-TalosInfo "Reusing existing base configs to generate node configs (use -RegenBase to regenerate base configs)."
+    } elseif ($hasBaseConfigs -and ($RegenBase -or $Force)) {
+        Write-TalosWarn "Regenerating base configs..."
+    } else {
+        Write-TalosInfo "Base configs not found. Will generate new base configs."
     }
 } else {
     New-Item -ItemType Directory -Path $outputDir | Out-Null
@@ -51,36 +75,40 @@ Write-TalosSuccess "Output: $outputDir"
 # ─── Build and run talosctl gen config ────────────────────────────────────────
 Write-TalosStep 3 "Generating machine configs"
 
-$clusterName   = $config.cluster.name
-$endpoint      = "https://$($config.talos.vip):6443"
-$installImage  = $config.schematic.vmwareInstallerImage
+if ($hasBaseConfigs -and -not $RegenBase -and -not $Force) {
+    Write-TalosSuccess "Skipped generating base configs (reusing existing)"
+} else {
+    $clusterName   = $config.cluster.name
+    $endpoint      = "https://$($config.talos.vip):6443"
+    $installImage  = $config.schematic.vmwareInstallerImage
 
-Write-TalosInfo "Cluster:       $clusterName"
-Write-TalosInfo "Endpoint:      $endpoint"
-Write-TalosInfo "Install image: $installImage"
+    Write-TalosInfo "Cluster:       $clusterName"
+    Write-TalosInfo "Endpoint:      $endpoint"
+    Write-TalosInfo "Install image: $installImage"
 
-$genArgs = @(
-    "gen", "config",
-    $clusterName,
-    $endpoint,
-    "--install-image", $installImage,
-    "--output-dir", $outputDir
-)
+    $genArgs = @(
+        "gen", "config",
+        $clusterName,
+        $endpoint,
+        "--install-image", $installImage,
+        "--output-dir", $outputDir
+    )
 
-if ($Force) {
-    $genArgs += "--force"
+    if ($Force -or $RegenBase) {
+        $genArgs += "--force"
+    }
+
+    $output = & talosctl @genArgs 2>&1
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "talosctl gen config failed: $output"
+        exit 1
+    }
+    Write-TalosSuccess "Machine configs generated"
 }
 
-$output = & talosctl @genArgs 2>&1
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "talosctl gen config failed: $output"
-    exit 1
-}
-Write-TalosSuccess "Machine configs generated"
-
-# ─── Show generated files ────────────────────────────────────────────────────
-Write-TalosStep 4 "Verifying output"
+# ─── Show generated files & configure endpoints/nodes ────────────────────────
+Write-TalosStep 4 "Verifying and configuring output"
 
 $expectedFiles = @("controlplane.yaml", "worker.yaml", "talosconfig")
 foreach ($file in $expectedFiles) {
@@ -91,6 +119,14 @@ foreach ($file in $expectedFiles) {
     } else {
         Write-TalosWarn "$file not found"
     }
+}
+
+$talosconfigPath = Join-Path $outputDir "talosconfig"
+if (Test-Path $talosconfigPath) {
+    $cpIps = $config.cluster.controlplane.nodes | ForEach-Object { $_.ip }
+    & talosctl --talosconfig $talosconfigPath config endpoint $cpIps 2>&1 | Out-Null
+    & talosctl --talosconfig $talosconfigPath config node $cpIps 2>&1 | Out-Null
+    Write-TalosSuccess "Configured endpoints and nodes in talosconfig: $($cpIps -join ', ')"
 }
 
 # ─── Generate per-node machine configs ────────────────────────────────────────

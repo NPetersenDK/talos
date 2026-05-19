@@ -138,6 +138,9 @@ function New-TalosNodeConfig {
                 interfaces  = @($iface)
                 nameservers = $Nameservers
             }
+            nodeLabels = @{
+                "bgp-policy" = "default"
+            }
         }
         cluster = @{
             network = @{
