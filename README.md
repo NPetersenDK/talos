@@ -202,24 +202,14 @@ When a new Talos version is released, generate a new schematic at [factory.talos
 
 ```bash
 # Upgrade control plane nodes one at a time
-talosctl upgrade -n <cp-1-ip> \
-  --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
-
-talosctl upgrade -n <cp-2-ip> \
-  --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
-
-talosctl upgrade -n <cp-3-ip> \
-  --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
+talosctl upgrade -n <cp-1-ip> --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
+talosctl upgrade -n <cp-2-ip> --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
+talosctl upgrade -n <cp-3-ip> --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
 
 # Then worker nodes
-talosctl upgrade -n <worker-1-ip> \
-  --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
-
-talosctl upgrade -n <worker-2-ip> \
-  --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
-
-talosctl upgrade -n <worker-3-ip> \
-  --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
+talosctl upgrade -n <worker-1-ip> --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
+talosctl upgrade -n <worker-2-ip> --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
+talosctl upgrade -n <worker-3-ip> --image factory.talos.dev/installer/<new-schematic-id>:<new-version>
 ```
 
 Talos upgrades in-place with an A/B partition scheme - each node reboots into the new version without data loss.

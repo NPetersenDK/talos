@@ -39,11 +39,7 @@ function Deploy-TalosVM {
     $configBase64 = [Convert]::ToBase64String($configBytes)
 
     Write-TalosInfo "Creating VM: $VMName"
-    $vm = New-VM -Name $VMName `
-        -ContentLibraryItem $LibraryItem `
-        -ResourcePool $TargetCluster `
-        -Datastore $TargetDatastore `
-        -DiskStorageFormat Thin
+    $vm = New-VM -Name $VMName -ContentLibraryItem $LibraryItem -ResourcePool $TargetCluster -Datastore $TargetDatastore -DiskStorageFormat Thin
 
     Write-TalosInfo "Setting resources: $NumCpu vCPU, ${MemoryGB} GB RAM, ${DiskGB} GB disk"
     Set-VM -VM $vm -NumCpu $NumCpu -MemoryGB $MemoryGB -Confirm:$false | Out-Null
@@ -159,12 +155,7 @@ foreach ($node in $cp.nodes) {
     Write-Host ""
     Write-TalosInfo "$vmName  ip=$($node.ip)  location=$($node.location)"
 
-    Deploy-TalosVM -VMName $vmName `
-        -ConfigPath $nodeConfig `
-        -NumCpu $cp.cpu -MemoryGB $cp.memoryGB -DiskGB $cp.diskGB `
-        -PortGroup $loc.PortGroup `
-        -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore `
-        -TargetFolder $vmFolder
+    Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -NumCpu $cp.cpu -MemoryGB $cp.memoryGB -DiskGB $cp.diskGB -PortGroup $loc.PortGroup -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore -TargetFolder $vmFolder
 
     Write-TalosSuccess "$vmName deployed"
     $createdVMs += "$vmName ($($node.ip))"
@@ -182,12 +173,7 @@ foreach ($node in $w.nodes) {
     Write-Host ""
     Write-TalosInfo "$vmName  ip=$($node.ip)  location=$($node.location)"
 
-    Deploy-TalosVM -VMName $vmName `
-        -ConfigPath $nodeConfig `
-        -NumCpu $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB `
-        -PortGroup $loc.PortGroup `
-        -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore `
-        -TargetFolder $vmFolder
+    Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -NumCpu $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB -PortGroup $loc.PortGroup -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore -TargetFolder $vmFolder
 
     Write-TalosSuccess "$vmName deployed"
     $createdVMs += "$vmName ($($node.ip))"

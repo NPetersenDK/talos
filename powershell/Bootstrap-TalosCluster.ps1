@@ -50,10 +50,7 @@ Write-TalosStep 2 "Bootstrapping etcd on $($cpNodes[0].hostname)"
 $bootstrapIP = $cpIPs[0]
 Write-TalosInfo "Target: $bootstrapIP"
 
-$bootstrapOutput = & talosctl bootstrap `
-    --talosconfig $talosConfig `
-    --endpoints $bootstrapIP `
-    --nodes $bootstrapIP 2>&1
+$bootstrapOutput = & talosctl bootstrap --talosconfig $talosConfig --endpoints $bootstrapIP --nodes $bootstrapIP 2>&1
 
 if ($LASTEXITCODE -ne 0) {
     if ($bootstrapOutput -match 'AlreadyExists') {
@@ -71,11 +68,7 @@ Write-TalosStep 3 "Waiting for etcd quorum ($($cpNodes.Count) members)"
 
 $elapsed = 0
 while ($true) {
-    $rawOutput = & talosctl get members `
-        --talosconfig $talosConfig `
-        --endpoints $bootstrapIP `
-        --nodes $bootstrapIP `
-        --output json 2>$null
+    $rawOutput = & talosctl get members --talosconfig $talosConfig --endpoints $bootstrapIP --nodes $bootstrapIP --output json 2>$null
 
     $members = @()
     $buffer = ""
@@ -117,11 +110,7 @@ Write-TalosInfo "Nodes: $($cpIPs -join ', ')"
 # ─── Retrieve kubeconfig ─────────────────────────────────────────────────────
 Write-TalosStep 5 "Retrieving kubeconfig"
 
-& talosctl kubeconfig $kubeconfigOut `
-    --talosconfig $talosConfig `
-    --endpoints $bootstrapIP `
-    --nodes $bootstrapIP `
-    --force
+& talosctl kubeconfig $kubeconfigOut --talosconfig $talosConfig --endpoints $bootstrapIP --nodes $bootstrapIP --force
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Failed to retrieve kubeconfig (exit $LASTEXITCODE)"

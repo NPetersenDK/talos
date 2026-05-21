@@ -144,28 +144,13 @@ if (-not (Test-Path $machineDir)) {
 
 foreach ($node in $config.cluster.controlplane.nodes) {
     $outFile = Join-Path $machineDir "$($node.hostname).yaml"
-    New-TalosNodeConfig `
-        -BaseConfigPath $cpConfigPath `
-        -Hostname $node.hostname `
-        -IP $node.ip `
-        -SubnetPrefix $net.subnetPrefix `
-        -Gateway $net.gateway `
-        -Nameservers $nameservers `
-        -VIP $config.talos.vip `
-        -OutputPath $outFile | Out-Null
+    New-TalosNodeConfig -BaseConfigPath $cpConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -VIP $config.talos.vip -OutputPath $outFile | Out-Null
     Write-TalosSuccess "$($node.hostname).yaml (controlplane)"
 }
 
 foreach ($node in $config.cluster.worker.nodes) {
     $outFile = Join-Path $machineDir "$($node.hostname).yaml"
-    New-TalosNodeConfig `
-        -BaseConfigPath $wkConfigPath `
-        -Hostname $node.hostname `
-        -IP $node.ip `
-        -SubnetPrefix $net.subnetPrefix `
-        -Gateway $net.gateway `
-        -Nameservers $nameservers `
-        -OutputPath $outFile | Out-Null
+    New-TalosNodeConfig -BaseConfigPath $wkConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -OutputPath $outFile | Out-Null
     Write-TalosSuccess "$($node.hostname).yaml (worker)"
 }
 

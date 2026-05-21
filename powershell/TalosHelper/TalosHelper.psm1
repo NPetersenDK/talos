@@ -167,9 +167,7 @@ function New-TalosNodeConfig {
     $yaml += ($hostnameConfig | ConvertTo-Yaml)
     $yaml | Set-Content -Path $tempPatch -Encoding UTF8
 
-    & talosctl machineconfig patch $BaseConfigPath `
-        --patch "@$tempPatch" `
-        --output $OutputPath
+    & talosctl machineconfig patch $BaseConfigPath --patch "@$tempPatch" --output $OutputPath
 
     Remove-Item $tempPatch -Force -ErrorAction SilentlyContinue
 
