@@ -12,7 +12,10 @@ param(
     [string]$ClusterName,
 
     [Parameter()]
-    [string]$KubeContext
+    [string]$KubeContext,
+
+    [Parameter()]
+    [string]$EntraGroupId
 )
 
 Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
@@ -150,12 +153,52 @@ if ($kubectlAvailable) {
     Write-TalosInfo "Run: kubectl get deployments,pods -n azure-arc"
 }
 
+# ─── Entra authentication ─────────────────────────────────────────────────────
+Write-TalosStep 8 "Binding Entra identity for portal and CLI access"
+
+if ($kubectlAvailable) {
+    $kubectlCtxArgs = @()
+    if ($KubeContext) { $kubectlCtxArgs = @('--context', $KubeContext) }
+
+    if ($EntraGroupId) {
+        $entityId = $EntraGroupId
+        $entityDesc = "group ($entityId)"
+        $bindingFlag = "--group"
+    } else {
+        $upn = (Get-AzContext).Account.Id
+        $entityId = (Get-AzADUser -UserPrincipalName $upn -ErrorAction SilentlyContinue).Id
+        $entityDesc = "signed-in user ($upn)"
+        $bindingFlag = "--user"
+    }
+
+    if (-not $entityId) {
+        Write-TalosWarn "Could not resolve Entra identity — skipping"
+        Write-TalosInfo "Run manually: kubectl create clusterrolebinding entra-user-binding --clusterrole cluster-admin --user <entra-object-id>"
+    } else {
+        $crbExists = kubectl get clusterrolebinding entra-user-binding @kubectlCtxArgs 2>$null
+        if (-not $crbExists) {
+            kubectl create clusterrolebinding entra-user-binding --clusterrole cluster-admin $bindingFlag $entityId @kubectlCtxArgs | Out-Null
+            Write-TalosSuccess "ClusterRoleBinding created for Entra $entityDesc"
+        } else {
+            Write-TalosInfo "ClusterRoleBinding entra-user-binding already exists"
+        }
+        Write-TalosSuccess "Portal and 'az connectedk8s proxy' will now use your Azure session — no token required"
+    }
+} else {
+    Write-TalosWarn "kubectl unavailable — skipping Entra binding"
+    Write-TalosInfo "Run manually after connecting kubectl:"
+    Write-TalosInfo "  kubectl create clusterrolebinding entra-user-binding --clusterrole cluster-admin --user <your-entra-object-id>"
+}
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 $summaryLines = @(
     "Cluster:       $ClusterName",
     "Resource group: $ResourceGroupName",
     "Location:      $Location",
     "Subscription:  $($ctx.Subscription.Name) ($SubscriptionId)",
+    "",
+    "To access the cluster from outside the network:",
+    "  az connectedk8s proxy -n $ClusterName -g $ResourceGroupName",
     "",
     "To remove the Arc resource:",
     "  Remove-AzConnectedKubernetes -ClusterName $ClusterName -ResourceGroupName $ResourceGroupName"
