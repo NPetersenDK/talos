@@ -150,7 +150,9 @@ foreach ($node in $config.cluster.controlplane.nodes) {
 
 foreach ($node in $config.cluster.worker.nodes) {
     $outFile = Join-Path $machineDir "$($node.hostname).yaml"
-    New-TalosNodeConfig -BaseConfigPath $wkConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -OutputPath $outFile | Out-Null
+    $workerStorage = $config.cluster.worker.storage
+    $workerDataDisk = [int]($config.cluster.worker.dataDiskGB ?? 0)
+    New-TalosNodeConfig -BaseConfigPath $wkConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -OutputPath $outFile -StorageConfig $workerStorage -DataDiskGB $workerDataDisk | Out-Null
     Write-TalosSuccess "$($node.hostname).yaml (worker)"
 }
 

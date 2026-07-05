@@ -18,16 +18,23 @@ function Get-TalosEnvironment {
     $config = ConvertFrom-Yaml $raw
 
     # Derive OVA URL from schematic ID and version
-    $config.schematic.ovaUrl = "https://factory.talos.dev/image/$($config.schematic.id)/$($config.schematic.version)/vmware-amd64.ova"
+    $config['schematic']['ovaUrl'] = "https://factory.talos.dev/image/$($config['schematic']['id'])/$($config['schematic']['version'])/vmware-amd64.ova"
 
     # Derive installer image for upgrades
-    $config.schematic.installerImage = "factory.talos.dev/installer/$($config.schematic.id):$($config.schematic.version)"
+    $config['schematic']['installerImage'] = "factory.talos.dev/installer/$($config['schematic']['id']):$($config['schematic']['version'])"
 
     # Derive VMware installer image for gen config
-    $config.schematic.vmwareInstallerImage = "factory.talos.dev/vmware-installer/$($config.schematic.id):$($config.schematic.version)"
+    $config['schematic']['vmwareInstallerImage'] = "factory.talos.dev/vmware-installer/$($config['schematic']['id']):$($config['schematic']['version'])"
 
     # Derive library item name from version + schematic ID
-    $config.schematic.libraryItemName = "talos-$($config.schematic.version)-$($config.schematic.id)"
+    $config['schematic']['libraryItemName'] = "talos-$($config['schematic']['version'])-$($config['schematic']['id'])"
+
+    # Validate: no duplicate hostnames across all nodes
+    $allNodes = @($config['cluster']['controlplane']['nodes']) + @($config['cluster']['worker']['nodes'])
+    $duplicates = $allNodes | Group-Object { $_['hostname'] } | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name }
+    if ($duplicates) {
+        throw "Duplicate hostnames found in environment.yaml: $($duplicates -join ', ')"
+    }
 
     return $config
 }
@@ -112,7 +119,16 @@ function New-TalosNodeConfig {
         [Parameter(Mandatory)][string]$Gateway,
         [Parameter(Mandatory)][string[]]$Nameservers,
         [string]$VIP = $null,
-        [string]$OutputPath = $null
+        [string]$OutputPath = $null,
+        # Optional storage config (from environment.yaml cluster.worker.storage)
+        # Preferred: hashtable with key 'datadisks' -> array of @{ sizeGB; mountpoint },
+        # one VMware disk per entry (/dev/sdb, /dev/sdc, ...).
+        # Legacy: hashtable with keys 'mountPath' / 'hostpathDir' + -DataDiskGB,
+        # for a single second disk (still supported for older environment.yaml files).
+        [hashtable]$StorageConfig = $null,
+        # Legacy: when set (and StorageConfig has no 'datadisks'), configures a
+        # single second disk at /dev/sdb using StorageConfig['mountPath'].
+        [int]$DataDiskGB = 0
     )
 
     $iface = @{
@@ -132,16 +148,83 @@ function New-TalosNodeConfig {
         $iface.vip = @{ ip = $VIP }
     }
 
-    $patch = @{
-        machine = @{
-            network = @{
-                interfaces  = @($iface)
-                nameservers = $Nameservers
+    $machine = @{
+        network = @{
+            interfaces  = @($iface)
+            nameservers = $Nameservers
+        }
+        nodeLabels = @{
+            "bgp-policy" = "default"
+        }
+    }
+
+    # ── Storage: additional disks ───────────────────────────────────────────
+    # Preferred path: one VMware disk per StorageConfig.datadisks entry
+    # (/dev/sdb, /dev/sdc, ...), each mounted at its own mountpoint. Longhorn's
+    # own default disk path (/var/lib/longhorn) doesn't need a kubelet
+    # extraMount — Longhorn's Helm chart bind-mounts that path into its own
+    # pods independently. Any other mountpoint (e.g. generic hostpath storage)
+    # gets a kubelet extraMount so hostPath volumes can see it.
+    if ($StorageConfig -and $StorageConfig['datadisks']) {
+        $devLetters  = @('b', 'c', 'd', 'e', 'f', 'g', 'h')
+        $disks       = @()
+        $extraMounts = @()
+        $i = 0
+        foreach ($dataDisk in @($StorageConfig['datadisks'])) {
+            $mountpoint = $dataDisk['mountpoint']
+            if (-not $mountpoint) { continue }
+            if ($i -ge $devLetters.Count) {
+                throw "Too many datadisks entries (max $($devLetters.Count) supported)"
             }
-            nodeLabels = @{
-                "bgp-policy" = "default"
+            $disks += @{
+                device     = "/dev/sd$($devLetters[$i])"
+                partitions = @(@{ mountpoint = $mountpoint })
+            }
+            if ($mountpoint -ne '/var/lib/longhorn') {
+                $extraMounts += @{
+                    destination = $mountpoint
+                    type        = "bind"
+                    source      = $mountpoint
+                    options     = @("bind", "rshared", "rw")
+                }
+            }
+            $i++
+        }
+        if ($disks.Count -gt 0) {
+            $machine['disks'] = $disks
+        }
+        if ($extraMounts.Count -gt 0) {
+            $machine['kubelet'] = @{ extraMounts = $extraMounts }
+        }
+    }
+    # Legacy path: single second disk via -DataDiskGB + StorageConfig.mountPath
+    elseif ($DataDiskGB -gt 0 -and $StorageConfig -and $StorageConfig['mountPath']) {
+        $machine['disks'] = @(
+            @{
+                device     = "/dev/sdb"
+                partitions = @(
+                    @{ mountpoint = $StorageConfig['mountPath'] }
+                )
+            }
+        )
+
+        if ($StorageConfig['hostpathDir']) {
+            $hostpathDir = $StorageConfig['hostpathDir']
+            $machine['kubelet'] = @{
+                extraMounts = @(
+                    @{
+                        destination = $hostpathDir
+                        type        = "bind"
+                        source      = $hostpathDir
+                        options     = @("bind", "rshared", "rw")
+                    }
+                )
             }
         }
+    }
+
+    $patch = @{
+        machine = $machine
         cluster = @{
             network = @{
                 cni = @{ name = "none" }

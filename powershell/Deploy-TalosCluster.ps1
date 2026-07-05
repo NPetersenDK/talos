@@ -28,6 +28,9 @@ function Deploy-TalosVM {
         [int]$NumCpu,
         [int]$MemoryGB,
         [int]$DiskGB,
+        # One VMware disk created per entry, in order (matches /dev/sdb, /dev/sdc, ...
+        # as assigned by New-TalosNodeConfig from the same storage.datadisks list).
+        [int[]]$DataDisksGB = @(),
         [string]$PortGroup,
         $LibraryItem,
         $TargetCluster,
@@ -46,6 +49,13 @@ function Deploy-TalosVM {
 
     $disk = Get-HardDisk -VM $vm | Select-Object -First 1
     Set-HardDisk -HardDisk $disk -CapacityGB $DiskGB -Confirm:$false | Out-Null
+
+    foreach ($size in $DataDisksGB) {
+        if ($size -gt 0) {
+            Write-TalosInfo "Adding data disk: ${size} GB"
+            New-HardDisk -VM $vm -CapacityGB $size -StorageFormat Thin -Confirm:$false | Out-Null
+        }
+    }
 
     $nic = Get-NetworkAdapter -VM $vm | Select-Object -First 1
     if ($nic) {
@@ -173,7 +183,16 @@ foreach ($node in $w.nodes) {
     Write-Host ""
     Write-TalosInfo "$vmName  ip=$($node.ip)  location=$($node.location)"
 
-    Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -NumCpu $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB -PortGroup $loc.PortGroup -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore -TargetFolder $vmFolder
+    # Prefer storage.datadisks (one VM disk per entry, in order); fall back to
+    # legacy single dataDiskGB for older environment.yaml files.
+    $dataDisksGB = @()
+    if ($w.storage -and $w.storage.datadisks) {
+        $dataDisksGB = @($w.storage.datadisks | ForEach-Object { [int]$_.sizeGB })
+    } elseif ($w.dataDiskGB) {
+        $dataDisksGB = @([int]$w.dataDiskGB)
+    }
+
+    Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -NumCpu $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB -DataDisksGB $dataDisksGB -PortGroup $loc.PortGroup -LibraryItem $item -TargetCluster $loc.Cluster -TargetDatastore $loc.Datastore -TargetFolder $vmFolder
 
     Write-TalosSuccess "$vmName deployed"
     $createdVMs += "$vmName ($($node.ip))"
