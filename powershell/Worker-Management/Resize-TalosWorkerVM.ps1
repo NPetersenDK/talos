@@ -68,7 +68,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
+Import-Module (Join-Path $PSScriptRoot "..\TalosHelper") -Force
 
 $ConfigsPath = Resolve-Path $ConfigsPath
 if (Test-Path $ConfigsPath -PathType Leaf) {
