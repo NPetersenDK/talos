@@ -97,7 +97,7 @@ This creates VMs from the content library (3 control plane + 3 workers), injects
 | Role          | VMs                                                     | vCPU | RAM  | Disk   |
 |---------------|---------------------------------------------------------|------|------|--------|
 | Control plane | `talos-cp-1`, `talos-cp-2`, `talos-cp-3`               | 2    | 4 GB | 50 GB  |
-| Worker        | `talos-worker-1`, `talos-worker-2`, `talos-worker-3`   | 4    | 8 GB | 100 GB |
+| Worker        | `talos-worker-1`, `talos-worker-2`, `talos-worker-3`   | 4    | 8 GB | 200 GB |
 
 ---
 
@@ -193,6 +193,26 @@ Get the initial admin password:
 ```bash
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
 ```
+
+---
+
+## Resizing worker disks
+
+The worker VM's single disk holds both Talos and Longhorn's data
+(`/var/lib/longhorn` lives on the EPHEMERAL partition). To give Longhorn more
+space, grow the disks in place — Talos auto-expands EPHEMERAL on boot and the
+Longhorn replica data is preserved.
+
+```powershell
+.\powershell\Expand-TalosWorkerDisk.ps1 -ConfigsPath "C:\path\to\your\configs"
+```
+
+Processes one worker at a time: grows the VMDK to `-TargetDiskGB` (default 200),
+cordons + drains, reboots via `talosctl`, waits for the node to return Ready,
+then waits for all Longhorn volumes to be healthy again before moving on — so 2
+healthy replicas stay available throughout. Use `-Node talos-worker-2` to do a
+single node, or `-SkipDrain` to skip the eviction step. Keep `worker.diskGB` in
+`environment.yaml` in sync with the target so future deploys match.
 
 ---
 

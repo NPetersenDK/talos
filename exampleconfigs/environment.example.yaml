@@ -41,9 +41,13 @@ cluster:
         location: mylocation
 
   worker:
-    cpu: 4
-    memoryGB: 8
-    diskGB: 100
+    cpu: 6
+    memoryGB: 12
+    diskGB: 40
+    storage:
+      datadisks:
+        - sizeGB: 200
+          mountpoint: /var/lib/longhorn
     configPath: talosfiles/worker.yaml
     nodes:
       - hostname: talos-worker-1
