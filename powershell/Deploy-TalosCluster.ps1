@@ -44,11 +44,19 @@ function Deploy-TalosVM {
     Write-TalosInfo "Creating VM: $VMName"
     $vm = New-VM -Name $VMName -ContentLibraryItem $LibraryItem -ResourcePool $TargetCluster -Datastore $TargetDatastore -DiskStorageFormat Thin
 
-    Write-TalosInfo "Setting resources: $NumCpu vCPU, ${MemoryGB} GB RAM, ${DiskGB} GB disk"
+    Write-TalosInfo "Setting resources: $NumCpu vCPU, ${MemoryGB} GB RAM"
     Set-VM -VM $vm -NumCpu $NumCpu -MemoryGB $MemoryGB -Confirm:$false | Out-Null
 
+    # diskGB is optional and only grows the OS disk shipped with the OVA;
+    # Set-HardDisk cannot shrink, so skip when target <= current size.
     $disk = Get-HardDisk -VM $vm | Select-Object -First 1
-    Set-HardDisk -HardDisk $disk -CapacityGB $DiskGB -Confirm:$false | Out-Null
+    $currentGB = [int][math]::Ceiling($disk.CapacityGB)
+    if ($DiskGB -gt $currentGB) {
+        Write-TalosInfo "Growing OS disk: ${currentGB} GB -> ${DiskGB} GB"
+        Set-HardDisk -HardDisk $disk -CapacityGB $DiskGB -Confirm:$false | Out-Null
+    } elseif ($DiskGB -gt 0 -and $DiskGB -lt $currentGB) {
+        Write-TalosWarn "diskGB (${DiskGB}) is smaller than the template OS disk (${currentGB} GB) - keeping ${currentGB} GB"
+    }
 
     foreach ($size in $DataDisksGB) {
         if ($size -gt 0) {

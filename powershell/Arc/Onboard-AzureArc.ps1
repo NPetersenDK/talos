@@ -18,7 +18,7 @@ param(
     [string]$EntraGroupId
 )
 
-Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
+Import-Module (Join-Path $PSScriptRoot "..\TalosHelper") -Force
 
 Write-TalosBanner "Onboard Cluster to Azure Arc"
 

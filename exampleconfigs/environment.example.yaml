@@ -27,7 +27,7 @@ cluster:
   controlplane:
     cpu: 4
     memoryGB: 8
-    diskGB: 50
+    diskGB: 50   # optional: grows the OVA OS disk; omit to keep template size (grow-only)
     configPath: talosfiles/controlplane.yaml
     nodes:
       - hostname: talos-cp-1
@@ -43,7 +43,7 @@ cluster:
   worker:
     cpu: 6
     memoryGB: 12
-    diskGB: 40
+    diskGB: 40   # optional: OS disk (/dev/sda); datadisks below become /dev/sdb, /dev/sdc, ...
     storage:
       datadisks:
         - sizeGB: 200
