@@ -7,7 +7,13 @@ kubeconfig
 talosconfig
 
 # Site-specific deployment config — store in talos-configs (private repo)
-powershell/environment.yaml
+# (any environment.yaml / environment.*.yaml except the *.example.yaml templates)
+environment.yaml
+environment.*.yaml
+!environment.*.example.yaml
+
+# Generated Talos output (machine configs, talosconfig, kubeconfig, backups)
+talosfiles/
 
 # Network device and BGP manifests — store in talos-configs (private repo)
 Network-Configs/
