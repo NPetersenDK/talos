@@ -6,7 +6,7 @@ param(
     [string]$KubeContext
 )
 
-Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
+Import-Module (Join-Path $PSScriptRoot ".." "TalosHelper") -Force
 
 Write-TalosBanner "Azure Arc - Entra Authentication Setup"
 

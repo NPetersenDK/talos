@@ -29,6 +29,10 @@ function Get-TalosEnvironment {
     # Derive library item name from version + schematic ID
     $config['schematic']['libraryItemName'] = "talos-$($config['schematic']['version'])-$($config['schematic']['id'])"
 
+    # Derive Proxmox (nocloud) image URL and cached filename on the Proxmox node
+    $config['schematic']['nocloudImageUrl'] = "https://factory.talos.dev/image/$($config['schematic']['id'])/$($config['schematic']['version'])/nocloud-amd64.raw.xz"
+    $config['schematic']['nocloudImageFile'] = "talos-$($config['schematic']['version'])-$($config['schematic']['id'])-nocloud-amd64.raw"
+
     # Validate: no duplicate hostnames across all nodes
     $allNodes = @($config['cluster']['controlplane']['nodes']) + @($config['cluster']['worker']['nodes'])
     $duplicates = $allNodes | Group-Object { $_['hostname'] } | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name }
@@ -56,6 +60,78 @@ function Connect-TalosVCenter {
 
     Write-Host "Connecting to vCenter: $Server"
     return Connect-VIServer -Server $Server
+}
+
+# Sessions and credential are cached for the lifetime of the module (one
+# password prompt per script run, one connection per host).
+$script:ProxmoxCredential  = $null
+$script:ProxmoxSshSessions = @{}
+
+function Get-ProxmoxSshSession {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SshHost,
+        [string]$User = 'root'
+    )
+
+    Import-Module Posh-SSH -ErrorAction Stop
+
+    $key = "$User@$SshHost"
+    $session = $script:ProxmoxSshSessions[$key]
+    if ($session -and $session.Session.IsConnected) {
+        return $session
+    }
+
+    if (-not $script:ProxmoxCredential -or $script:ProxmoxCredential.UserName -ne $User) {
+        $script:ProxmoxCredential = Get-Credential -UserName $User -Message "SSH password for $User on Proxmox host(s)"
+        if (-not $script:ProxmoxCredential) {
+            throw "No credential provided for Proxmox SSH"
+        }
+    }
+
+    $session = New-SSHSession -ComputerName $SshHost -Credential $script:ProxmoxCredential -AcceptKey -ErrorAction Stop
+    $script:ProxmoxSshSessions[$key] = $session
+    return $session
+}
+
+function Invoke-ProxmoxSsh {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SshHost,
+        [string]$User = 'root',
+        [Parameter(Mandatory)][string]$Command,
+        # Long-running commands (image download) need more than the 60s default
+        [int]$TimeoutSeconds = 600,
+        # Return output without throwing on non-zero exit (caller checks $LASTEXITCODE)
+        [switch]$AllowFailure
+    )
+
+    $session = Get-ProxmoxSshSession -SshHost $SshHost -User $User
+    $result  = Invoke-SSHCommand -SSHSession $session -Command $Command -TimeOut $TimeoutSeconds
+
+    # Preserve the $LASTEXITCODE contract callers rely on
+    $global:LASTEXITCODE = $result.ExitStatus
+
+    if ($result.ExitStatus -ne 0 -and -not $AllowFailure) {
+        throw "SSH command failed on $SshHost (exit $($result.ExitStatus)): $Command`n$($result.Output -join "`n")`n$($result.Error -join "`n")"
+    }
+    return $result.Output
+}
+
+function Copy-ProxmoxFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SshHost,
+        [string]$User = 'root',
+        [Parameter(Mandatory)][string]$LocalPath,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
+
+    # Write file content over the existing SSH session instead of opening a
+    # separate SCP/SFTP connection; machine configs are small text files.
+    $content = Get-Content -Path $LocalPath -Raw
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($content))
+    Invoke-ProxmoxSsh -SshHost $SshHost -User $User -Command "echo '$b64' | base64 -d > '$RemotePath'" | Out-Null
 }
 
 # ─── Formatting Helpers ──────────────────────────────────────────────────────
@@ -118,6 +194,9 @@ function New-TalosNodeConfig {
         [Parameter(Mandatory)][string]$SubnetPrefix,
         [Parameter(Mandatory)][string]$Gateway,
         [Parameter(Mandatory)][string[]]$Nameservers,
+        # Interface MTU; 0 = omit from config (Talos/kernel default, 1500).
+        # Only set >1500 when the hypervisor NIC and physical network support it.
+        [int]$Mtu = 0,
         [string]$VIP = $null,
         [string]$OutputPath = $null,
         # Optional storage config (from environment.yaml cluster.worker.storage)
@@ -134,7 +213,6 @@ function New-TalosNodeConfig {
     $iface = @{
         interface = "eth0"
         dhcp      = $false
-        mtu       = 9000
         addresses = @("$IP/$SubnetPrefix")
         routes    = @(
             @{
@@ -142,6 +220,10 @@ function New-TalosNodeConfig {
                 gateway = $Gateway
             }
         )
+    }
+
+    if ($Mtu -gt 0) {
+        $iface.mtu = $Mtu
     }
 
     if ($VIP) {
@@ -262,5 +344,6 @@ function New-TalosNodeConfig {
 }
 
 Export-ModuleMember -Function Get-TalosEnvironment, Connect-TalosVCenter,
+    Invoke-ProxmoxSsh, Copy-ProxmoxFile,
     Write-TalosBanner, Write-TalosStep, Write-TalosSuccess, Write-TalosWarn,
     Write-TalosInfo, Write-TalosSummary, New-TalosNodeConfig

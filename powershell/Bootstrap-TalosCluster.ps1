@@ -1,16 +1,20 @@
 #Requires -Modules powershell-yaml
 param(
+    # Path to your environment yaml file (e.g. C:\configs\environment.yaml).
+    # talosfiles/ paths are resolved relative to it.
     [Parameter(Mandatory)]
-    [string]$ConfigsPath
+    [string]$EnvironmentFile
 )
 
 Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
 
-$ConfigsPath = Resolve-Path $ConfigsPath
-if (Test-Path $ConfigsPath -PathType Leaf) {
-    $ConfigsPath = Split-Path $ConfigsPath -Parent
+if (-not (Test-Path $EnvironmentFile -PathType Leaf)) {
+    Write-Error "Environment file not found: $EnvironmentFile`nPoint -EnvironmentFile directly at your environment yaml file"
+    exit 1
 }
-$config = Get-TalosEnvironment -Path (Join-Path $ConfigsPath "environment.yaml")
+$EnvironmentFile = (Resolve-Path $EnvironmentFile).Path
+$ConfigsPath = Split-Path $EnvironmentFile -Parent
+$config = Get-TalosEnvironment -Path $EnvironmentFile
 
 Write-TalosBanner "Bootstrap Talos Cluster"
 

@@ -1,7 +1,9 @@
 #Requires -Modules powershell-yaml
 param(
+    # Path to your environment yaml file (e.g. C:\configs\environment.yaml).
+    # Generated files (talosfiles/) are written next to it.
     [Parameter(Mandatory)]
-    [string]$ConfigsPath,
+    [string]$EnvironmentFile,
 
     [switch]$Force,
     [switch]$RegenBase
@@ -9,11 +11,13 @@ param(
 
 Import-Module (Join-Path $PSScriptRoot "TalosHelper") -Force
 
-$ConfigsPath = Resolve-Path $ConfigsPath
-if (Test-Path $ConfigsPath -PathType Leaf) {
-    $ConfigsPath = Split-Path $ConfigsPath -Parent
+if (-not (Test-Path $EnvironmentFile -PathType Leaf)) {
+    Write-Error "Environment file not found: $EnvironmentFile`nPoint -EnvironmentFile directly at your environment yaml file"
+    exit 1
 }
-$config = Get-TalosEnvironment -Path (Join-Path $ConfigsPath "environment.yaml")
+$EnvironmentFile = (Resolve-Path $EnvironmentFile).Path
+$ConfigsPath = Split-Path $EnvironmentFile -Parent
+$config = Get-TalosEnvironment -Path $EnvironmentFile
 
 Write-TalosBanner "Initialize Talos Config"
 
@@ -75,12 +79,20 @@ Write-TalosSuccess "Output: $outputDir"
 # ─── Build and run talosctl gen config ────────────────────────────────────────
 Write-TalosStep 3 "Generating machine configs"
 
+$clusterName = $config.cluster.name
+$endpoint    = "https://$($config.talos.vip):6443"
+
 if ($hasBaseConfigs -and -not $RegenBase -and -not $Force) {
     Write-TalosSuccess "Skipped generating base configs (reusing existing)"
 } else {
-    $clusterName   = $config.cluster.name
-    $endpoint      = "https://$($config.talos.vip):6443"
-    $installImage  = $config.schematic.vmwareInstallerImage
+    # Proxmox (nocloud) boots the factory disk image directly, so the plain
+    # installer image is used for installs/upgrades; VMware needs the
+    # vmware-installer variant.
+    $installImage  = if ($config.proxmox) {
+        $config.schematic.installerImage
+    } else {
+        $config.schematic.vmwareInstallerImage
+    }
 
     Write-TalosInfo "Cluster:       $clusterName"
     Write-TalosInfo "Endpoint:      $endpoint"
@@ -137,6 +149,7 @@ $cpConfigPath  = Join-Path $outputDir "controlplane.yaml"
 $wkConfigPath  = Join-Path $outputDir "worker.yaml"
 $net           = $config.cluster.network
 $nameservers   = @($net.nameservers)
+$mtu           = [int]($net.mtu ?? 0)
 
 if (-not (Test-Path $machineDir)) {
     New-Item -ItemType Directory -Path $machineDir | Out-Null
@@ -144,7 +157,7 @@ if (-not (Test-Path $machineDir)) {
 
 foreach ($node in $config.cluster.controlplane.nodes) {
     $outFile = Join-Path $machineDir "$($node.hostname).yaml"
-    New-TalosNodeConfig -BaseConfigPath $cpConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -VIP $config.talos.vip -OutputPath $outFile | Out-Null
+    New-TalosNodeConfig -BaseConfigPath $cpConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -Mtu $mtu -VIP $config.talos.vip -OutputPath $outFile | Out-Null
     Write-TalosSuccess "$($node.hostname).yaml (controlplane)"
 }
 
@@ -152,7 +165,7 @@ foreach ($node in $config.cluster.worker.nodes) {
     $outFile = Join-Path $machineDir "$($node.hostname).yaml"
     $workerStorage = $config.cluster.worker.storage
     $workerDataDisk = [int]($config.cluster.worker.dataDiskGB ?? 0)
-    New-TalosNodeConfig -BaseConfigPath $wkConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -OutputPath $outFile -StorageConfig $workerStorage -DataDiskGB $workerDataDisk | Out-Null
+    New-TalosNodeConfig -BaseConfigPath $wkConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -Mtu $mtu -OutputPath $outFile -StorageConfig $workerStorage -DataDiskGB $workerDataDisk | Out-Null
     Write-TalosSuccess "$($node.hostname).yaml (worker)"
 }
 
@@ -166,7 +179,7 @@ Write-TalosSummary "Config Generated" @(
     "  $outputDir",
     "",
     "Next steps:",
-    "  1. Upload-TalosOva.ps1    (import OVA)",
-    "  2. Deploy-TalosCluster.ps1 (create VMs)",
+    "  1. VMware\Upload-TalosOva.ps1 or Proxmox\Prepare-TalosImage.ps1 (image)",
+    "  2. VMware\Deploy-TalosCluster.ps1 or Proxmox\Deploy-TalosCluster.ps1 (VMs)",
     "  3. Bootstrap-TalosCluster.ps1 (bootstrap)"
 )
