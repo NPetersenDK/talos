@@ -8,6 +8,8 @@
     FunctionsToExport = @(
         'Get-TalosEnvironment',
         'Connect-TalosVCenter',
+        'Invoke-ProxmoxSsh',
+        'Copy-ProxmoxFile',
         'New-TalosNodeConfig',
         'Write-TalosBanner',
         'Write-TalosStep',
