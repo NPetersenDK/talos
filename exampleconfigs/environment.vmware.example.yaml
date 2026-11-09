@@ -23,6 +23,7 @@ cluster:
     nameservers:
       - 10.13.37.1
     subnetPrefix: 24
+    mtu: 9000       # optional: omit for default 1500; requires jumbo frames end-to-end
 
   controlplane:
     cpu: 4

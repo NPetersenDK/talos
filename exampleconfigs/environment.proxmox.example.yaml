@@ -1,0 +1,67 @@
+proxmox:
+  sshUser: root                     # SSH user on the Proxmox hosts (key-based auth required)
+  imagePath: /var/lib/vz/template/talos   # where the nocloud image is cached on each host
+  snippetsStorage: local            # storage with 'snippets' content enabled
+  snippetsPath: /var/lib/vz/snippets      # filesystem path of that snippets storage
+  locations:
+    mylocation:
+      host: pve01.example.local     # SSH host of the Proxmox node
+      storage: local-lvm            # VM disk storage
+      bridge: vmbr0
+      # vlan: 1337                  # optional VLAN tag on net0
+      # mtu: 9000                   # optional NIC MTU (must match bridge + machine config MTU)
+
+schematic:
+  id: 88d1f7a5c4f1d3aba7df787c448c1d3d008ed29cfb34af53fa0df4336a56040b
+  version: v1.13.6
+
+cluster:
+  name: my-cluster
+  network:
+    gateway: 10.13.37.1
+    nameservers:
+      - 10.13.37.1
+    subnetPrefix: 24
+    # mtu: 9000     # optional: also set proxmox location 'mtu' + jumbo bridge, else nodes fail to set MTU
+
+  controlplane:
+    cpu: 4
+    memoryGB: 8
+    diskGB: 50   # optional: grows the imported OS disk; omit to keep image size (grow-only)
+    configPath: talosfiles/controlplane.yaml
+    nodes:
+      - hostname: talos-cp-1
+        ip: 10.13.37.11
+        location: mylocation
+        # vmid: 401                 # optional: fixed VMID; omit to auto-assign
+      - hostname: talos-cp-2
+        ip: 10.13.37.12
+        location: mylocation
+      - hostname: talos-cp-3
+        ip: 10.13.37.13
+        location: mylocation
+
+  worker:
+    cpu: 6
+    memoryGB: 12
+    diskGB: 40   # optional: OS disk (/dev/sda); datadisks below become /dev/sdb, /dev/sdc, ...
+    storage:
+      datadisks:
+        - sizeGB: 200
+          mountpoint: /var/lib/longhorn
+    configPath: talosfiles/worker.yaml
+    nodes:
+      - hostname: talos-worker-1
+        ip: 10.13.37.21
+        location: mylocation
+      - hostname: talos-worker-2
+        ip: 10.13.37.22
+        location: mylocation
+      - hostname: talos-worker-3
+        ip: 10.13.37.23
+        location: mylocation
+
+talos:
+  vip: 10.13.37.10
+  talosConfigPath: talosfiles/talosconfig
+  kubeconfigPath: talosfiles/kubeconfig
