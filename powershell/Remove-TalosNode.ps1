@@ -1,30 +1,19 @@
 #Requires -Modules powershell-yaml
 <#
 .SYNOPSIS
-    Safely removes ONE node from a running cluster (control plane or worker),
-    then deletes its VM (VMware or Proxmox, picked from the node's location).
+    Removes one node (control plane or worker) and deletes its VM (VMware or Proxmox).
 
 .DESCRIPTION
-    Worker:        Longhorn evacuation -> drain -> talosctl reset -> kubectl delete node -> delete VM
-    Control plane: safety check (keeps >= 3 etcd members) -> drain -> talosctl reset --graceful
-                   (leaves etcd) -> kubectl delete node -> delete VM
-
-    Add the replacement node FIRST (Proxmox\Deploy-TalosCluster.ps1 -Nodes ...) and wait
-    until it is Ready (and, for a control plane, an etcd member) before running this.
-
-    Afterwards remove the node from environment.yaml yourself.
-
-.PARAMETER EnvironmentFile
-    Path to your environment yaml file. talosfiles/ paths are resolved relative to it.
-
-.PARAMETER Hostname
-    Hostname of the node to remove, as written in environment.yaml.
+    Worker: Longhorn eviction, drain, talosctl reset, delete node, delete VM.
+    Control plane: refuses to leave fewer than 3 etcd members, then drain, graceful reset
+    (leaves etcd), delete node, delete VM.
+    Add and verify the replacement first. Remove the node from environment.yaml afterwards.
 
 .PARAMETER KeepVM
-    Leave the VM in the hypervisor (only remove the node from Talos/Kubernetes).
+    Leave the VM in the hypervisor.
 
 .PARAMETER Force
-    Allow removing a control plane even if it leaves fewer than 3 etcd members.
+    Allow a control plane removal that leaves fewer than 3 etcd members.
 
 .EXAMPLE
     .\Remove-TalosNode.ps1 -EnvironmentFile "C:\configs\environment.yaml" -Hostname talos-worker-3

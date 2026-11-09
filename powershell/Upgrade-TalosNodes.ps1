@@ -1,19 +1,12 @@
 #Requires -Modules powershell-yaml
 <#
 .SYNOPSIS
-    Rolling upgrade of Talos nodes to the installer image derived from the schematic
-    in environment.yaml (schematic.id + schematic.version). One node at a time:
-    drain -> talosctl upgrade -> Ready -> uncordon -> (control plane: etcd healthy,
-    worker: Longhorn healthy) -> next.
-
-    Use it to move existing nodes to a new schematic (same or newer Talos version).
-    Control planes go first, then workers.
-
-.PARAMETER EnvironmentFile
-    Path to your environment yaml file. talosfiles/ paths are resolved relative to it.
+    Rolling upgrade to the installer image from schematic.id + schematic.version in
+    environment.yaml. Control planes first, one node at a time: drain, upgrade, Ready, uncordon,
+    then etcd (control plane) or Longhorn (worker) healthy before the next.
 
 .PARAMETER Nodes
-    Only upgrade these hostnames. Default: every node in environment.yaml.
+    Only these hostnames. Default: all.
 
 .EXAMPLE
     .\Upgrade-TalosNodes.ps1 -EnvironmentFile "C:\configs\environment.yaml" -Nodes talos-cp-1,talos-worker-1
@@ -22,7 +15,10 @@ param(
     [Parameter(Mandatory)]
     [string]$EnvironmentFile,
 
-    [string[]]$Nodes = @()
+    [string[]]$Nodes = @(),
+
+    # Skip the NIC-by-name check.
+    [switch]$SkipNetworkCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,6 +83,16 @@ foreach ($t in $ordered) {
 
     Write-Host ""
     Write-TalosInfo "$($node.hostname) ($($node.ip)) -> $image"
+
+    # Guard: a config bound to the NIC name (eth0) loses its IP when the upgrade renames the NIC.
+    # Refuse until Apply-TalosConfig.ps1 has bound it to the MAC.
+    if (-not $SkipNetworkCheck) {
+        $live = (& talosctl --talosconfig $tc -e $via -n $node.ip get machineconfig -o yaml 2>&1) -join "`n"
+        if ($LASTEXITCODE -ne 0) { throw "Could not read the live config of $($node.hostname): $live" }
+        if ($live -match '(?ms)^\s*interfaces:\s*\n\s*-\s+interface:\s*\S+') {
+            throw "$($node.hostname) selects its NIC by name in the live machine config. Upgrading would rename the NIC and drop its IP. Run Apply-TalosConfig.ps1 -Nodes $($node.hostname) -Apply first (or -SkipNetworkCheck if you know better)."
+        }
+    }
 
     if (-not $t.IsCp) { Wait-LonghornHealthy }
 

@@ -1,21 +1,15 @@
 #Requires -Modules Posh-SSH
 <#
 .SYNOPSIS
-    Prepares a freshly installed Proxmox VE node so Talos VMs can be deployed on it.
+    Prepares a fresh Proxmox VE node over SSH for Talos VMs.
 
 .DESCRIPTION
-    Runs over SSH from your workstation against a new node and:
-      1. Switches the apt repos from Enterprise to pve-no-subscription (community) and updates the node
-      2. Enables IOMMU + vfio so a GPU can be passed through to a Talos VM
-      3. Turns the unused NVMe disk into VM storage (LVM-thin by default, or ZFS)
-      4. Turns the second NIC into a VLAN-aware bridge (vmbr1) and prompts for VLANs
-         (name + VLAN ID), creating each as an SDN VNet you can attach VMs to by name
-      5. Offers a reboot (required for IOMMU / vfio changes to take effect)
-
-    Every step is idempotent: re-running skips what is already done, and you can
-    re-run it just to add more VLANs.
-
-    Management NIC (10.0.6.0/24, vmbr0) is never touched.
+    1. apt: Enterprise to pve-no-subscription, update.
+    2. IOMMU + vfio for GPU passthrough.
+    3. The unused NVMe as VM storage (LVM-thin, or ZFS).
+    4. The second NIC as a VLAN-aware bridge (vmbr1); prompts for VLANs, created as SDN VNets.
+    5. Offers a reboot (needed for IOMMU).
+    Idempotent. The management NIC (vmbr0) is never touched.
 
 .EXAMPLE
     .\Prepare-ProxmoxNode.ps1 -PveHost 10.0.6.21

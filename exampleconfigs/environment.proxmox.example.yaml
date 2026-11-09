@@ -34,6 +34,7 @@ cluster:
         ip: 10.13.37.11
         location: mylocation
         # vmid: 401                 # optional: fixed VMID; omit to auto-assign
+        # mac: "bc:24:11:aa:bb:01"  # NIC MAC the IP is bound to. Filled in by deploy / Apply-TalosConfig.ps1.
       - hostname: talos-cp-2
         ip: 10.13.37.12
         location: mylocation

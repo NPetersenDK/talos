@@ -23,6 +23,9 @@ function Get-TalosEnvironment {
     # Derive installer image for upgrades
     $config['schematic']['installerImage'] = "factory.talos.dev/installer/$($config['schematic']['id']):$($config['schematic']['version'])"
 
+    # Proxmox (nocloud) nodes: the plain installer would switch them to talos.platform=metal.
+    $config['schematic']['nocloudInstallerImage'] = "factory.talos.dev/nocloud-installer/$($config['schematic']['id']):$($config['schematic']['version'])"
+
     # Derive VMware installer image for gen config
     $config['schematic']['vmwareInstallerImage'] = "factory.talos.dev/vmware-installer/$($config['schematic']['id']):$($config['schematic']['version'])"
 
@@ -62,6 +65,134 @@ function Connect-TalosVCenter {
     return Connect-VIServer -Server $Server
 }
 
+# ─── MAC addresses (node.mac in environment.yaml is the source of truth) ─────
+
+# Sets node.mac in environment.yaml by editing the text, so comments and line endings survive.
+function Set-TalosNodeMac {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Hostname,
+        [Parameter(Mandatory)][string]$Mac
+    )
+
+    if ($Mac -notmatch '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$') {
+        throw "Invalid MAC address '$Mac' (want aa:bb:cc:dd:ee:ff)"
+    }
+    $Mac = $Mac.ToLower()
+
+    $raw   = [System.IO.File]::ReadAllText($Path)
+    $eol   = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.AddRange([string[]]($raw -split "\r?\n"))
+
+    $hostPattern = '^(\s*)-\s+hostname:\s*["'']?' + [regex]::Escape($Hostname) + '["'']?\s*(#.*)?$'
+    $start = -1
+    $keyIndent = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match $hostPattern) {
+            $start = $i
+            $keyIndent = $Matches[1].Length + 2
+            break
+        }
+    }
+    if ($start -lt 0) { throw "Node '$Hostname' not found in $Path" }
+
+    # The block ends at the first line indented less than its keys.
+    $end = $lines.Count
+    for ($j = $start + 1; $j -lt $lines.Count; $j++) {
+        $l = $lines[$j]
+        if ($l -match '^\s*$' -or $l -match '^\s*#') { continue }
+        $indent = $l.Length - $l.TrimStart().Length
+        if ($indent -lt $keyIndent) { $end = $j; break }
+    }
+
+    $macLine = (' ' * $keyIndent) + 'mac: "' + $Mac + '"'
+    for ($k = $start + 1; $k -lt $end; $k++) {
+        if ($lines[$k] -match '^\s*mac:') {
+            $lines[$k] = $macLine
+            [System.IO.File]::WriteAllText($Path, ($lines -join $eol))
+            return
+        }
+    }
+
+    # No mac yet: insert after the block's last key line.
+    $at = $end
+    while ($at -gt $start + 1 -and ($lines[$at - 1] -match '^\s*$' -or $lines[$at - 1] -match '^\s*#')) { $at-- }
+    $lines.Insert($at, $macLine)
+    [System.IO.File]::WriteAllText($Path, ($lines -join $eol))
+}
+
+# MAC of a running node's one physical NIC (type ether, no kind). Refuses unless exactly one.
+function Get-TalosNodeMacLive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TalosConfig,
+        [Parameter(Mandatory)][string]$Address
+    )
+
+    $out = & talosctl --talosconfig $TalosConfig -e $Address -n $Address get links -o json 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "talosctl get links failed on ${Address}: $($out -join ' ')" }
+
+    # talosctl prints one JSON object per resource, not an array.
+    $text  = ($out | Out-String).Trim()
+    $links = ('[' + ($text -replace '\}\s*\{', '},{') + ']') | ConvertFrom-Json
+
+    $candidates = @($links | Where-Object {
+        $_.spec.type -eq 'ether' -and [string]::IsNullOrEmpty($_.spec.kind) -and $_.spec.hardwareAddr
+    })
+    if ($candidates.Count -ne 1) {
+        $found = ($candidates | ForEach-Object { "$($_.metadata.id)=$($_.spec.hardwareAddr)" }) -join ', '
+        throw "Expected exactly one physical NIC on $Address, found $($candidates.Count) ($found). Set node.mac in environment.yaml by hand."
+    }
+    return $candidates[0].spec.hardwareAddr.ToLower()
+}
+
+# One node's machine config from environment.yaml + the base config (shared by Initialize,
+# Proxmox deploy and Apply).
+function New-TalosNodeConfigFromEnvironment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)]$Node,
+        [Parameter(Mandatory)][ValidateSet('controlplane', 'worker')][string]$Role,
+        # Folder holding environment.yaml and talosfiles/
+        [Parameter(Mandatory)][string]$ConfigsPath
+    )
+
+    $outputDir  = Join-Path $ConfigsPath "talosfiles"
+    $machineDir = Join-Path $outputDir "machineconfigs"
+    $base       = Join-Path $outputDir "$Role.yaml"
+    if (-not (Test-Path $base)) {
+        throw "Base config not found: $base. Run Initialize-TalosConfig.ps1 first (never with -RegenBase on a live cluster)."
+    }
+    if (-not (Test-Path $machineDir)) { New-Item -ItemType Directory -Path $machineDir | Out-Null }
+
+    $net = $Config.cluster.network
+    $out = Join-Path $machineDir "$($Node.hostname).yaml"
+    $params = @{
+        BaseConfigPath = $base
+        Hostname       = $Node.hostname
+        IP             = $Node.ip
+        SubnetPrefix   = $net.subnetPrefix
+        Gateway        = $net.gateway
+        Nameservers    = @($net.nameservers)
+        Mtu            = [int]($net.mtu ?? 0)
+        InstallImage   = (Get-TalosInstallerImage -Config $Config -Node $Node)
+        Mac            = $Node.mac
+        OutputPath     = $out
+    }
+    if ($Role -eq 'controlplane') {
+        $params.VIP = $Config.talos.vip
+    }
+    else {
+        if ($Config.cluster.worker.storage) { $params.StorageConfig = $Config.cluster.worker.storage }
+        $params.DataDiskGB = [int]($Config.cluster.worker.dataDiskGB ?? 0)
+    }
+    New-TalosNodeConfig @params | Out-Null
+    return $out
+}
+
 # Installer image for a node: Proxmox (nocloud) nodes use the plain installer,
 # VMware nodes the vmware-installer variant. A node is a Proxmox node when its
 # location is defined under proxmox.locations.
@@ -72,7 +203,7 @@ function Get-TalosInstallerImage {
         [Parameter(Mandatory)]$Node
     )
     $isProxmox = $Config.proxmox -and $Config.proxmox.locations -and ($Config.proxmox.locations.Keys -contains $Node.location)
-    if ($isProxmox) { return $Config.schematic.installerImage }
+    if ($isProxmox) { return $Config.schematic.nocloudInstallerImage }
     return $Config.schematic.vmwareInstallerImage
 }
 
@@ -217,6 +348,8 @@ function New-TalosNodeConfig {
         # Needed when the base config carries a different installer than this node
         # should use (e.g. Proxmox nodes in a cluster whose base config is VMware).
         [string]$InstallImage = $null,
+        # NIC MAC (aa:bb:cc:dd:ee:ff) the static address is bound to. Required.
+        [string]$Mac = $null,
         # Optional storage config (from environment.yaml cluster.worker.storage)
         # Preferred: hashtable with key 'datadisks' -> array of @{ sizeGB; mountpoint },
         # one VMware disk per entry (/dev/sdb, /dev/sdc, ...).
@@ -228,8 +361,12 @@ function New-TalosNodeConfig {
         [int]$DataDiskGB = 0
     )
 
+    # Bind to the MAC, never the NIC name: Talos 1.14 renames eth0 to ens18 and a name-bound
+    # config then matches nothing (node falls back to DHCP). No MAC, no config: no guessing.
+    if (-not $Mac) {
+        throw "No MAC address for $Hostname. Set node.mac in environment.yaml (Proxmox deploy and Apply-TalosConfig.ps1 fill it in)."
+    }
     $iface = @{
-        interface = "eth0"
         dhcp      = $false
         addresses = @("$IP/$SubnetPrefix")
         routes    = @(
@@ -239,6 +376,10 @@ function New-TalosNodeConfig {
             }
         )
     }
+    if ($Mac -notmatch '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$') {
+        throw "Invalid MAC address '$Mac' for $Hostname (want aa:bb:cc:dd:ee:ff)"
+    }
+    $iface.deviceSelector = @{ hardwareAddr = $Mac.ToLower() }
 
     if ($Mtu -gt 0) {
         $iface.mtu = $Mtu
@@ -368,4 +509,5 @@ function New-TalosNodeConfig {
 Export-ModuleMember -Function Get-TalosEnvironment, Connect-TalosVCenter,
     Invoke-ProxmoxSsh, Copy-ProxmoxFile,
     Write-TalosBanner, Write-TalosStep, Write-TalosSuccess, Write-TalosWarn,
-    Write-TalosInfo, Write-TalosSummary, New-TalosNodeConfig, Get-TalosInstallerImage
+    Write-TalosInfo, Write-TalosSummary, New-TalosNodeConfig, Get-TalosInstallerImage,
+    Set-TalosNodeMac, Get-TalosNodeMacLive, New-TalosNodeConfigFromEnvironment

@@ -89,7 +89,7 @@ if ($hasBaseConfigs -and -not $RegenBase -and -not $Force) {
     # installer image is used for installs/upgrades; VMware needs the
     # vmware-installer variant.
     $installImage  = if ($config.proxmox) {
-        $config.schematic.installerImage
+        $config.schematic.nocloudInstallerImage
     } else {
         $config.schematic.vmwareInstallerImage
     }
@@ -144,29 +144,21 @@ if (Test-Path $talosconfigPath) {
 # ─── Generate per-node machine configs ────────────────────────────────────────
 Write-TalosStep 5 "Generating per-node machine configs"
 
-$machineDir    = Join-Path $outputDir "machineconfigs"
-$cpConfigPath  = Join-Path $outputDir "controlplane.yaml"
-$wkConfigPath  = Join-Path $outputDir "worker.yaml"
-$net           = $config.cluster.network
-$nameservers   = @($net.nameservers)
-$mtu           = [int]($net.mtu ?? 0)
-
-if (-not (Test-Path $machineDir)) {
-    New-Item -ItemType Directory -Path $machineDir | Out-Null
-}
-
-foreach ($node in $config.cluster.controlplane.nodes) {
-    $outFile = Join-Path $machineDir "$($node.hostname).yaml"
-    New-TalosNodeConfig -BaseConfigPath $cpConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -Mtu $mtu -VIP $config.talos.vip -InstallImage (Get-TalosInstallerImage -Config $config -Node $node) -OutputPath $outFile | Out-Null
-    Write-TalosSuccess "$($node.hostname).yaml (controlplane)"
-}
-
-foreach ($node in $config.cluster.worker.nodes) {
-    $outFile = Join-Path $machineDir "$($node.hostname).yaml"
-    $workerStorage = $config.cluster.worker.storage
-    $workerDataDisk = [int]($config.cluster.worker.dataDiskGB ?? 0)
-    New-TalosNodeConfig -BaseConfigPath $wkConfigPath -Hostname $node.hostname -IP $node.ip -SubnetPrefix $net.subnetPrefix -Gateway $net.gateway -Nameservers $nameservers -Mtu $mtu -InstallImage (Get-TalosInstallerImage -Config $config -Node $node) -OutputPath $outFile -StorageConfig $workerStorage -DataDiskGB $workerDataDisk | Out-Null
-    Write-TalosSuccess "$($node.hostname).yaml (worker)"
+# Nodes without node.mac are skipped: Proxmox deploy and Apply-TalosConfig.ps1 fill it in
+# and generate their config.
+$pending = @()
+foreach ($entry in @(
+        @{ Role = 'controlplane'; Nodes = @($config.cluster.controlplane.nodes) },
+        @{ Role = 'worker';       Nodes = @($config.cluster.worker.nodes) })) {
+    foreach ($node in $entry.Nodes) {
+        if (-not $node.mac) {
+            Write-TalosWarn "$($node.hostname): no mac in environment.yaml - config is generated when the node is deployed or applied"
+            $pending += $node.hostname
+            continue
+        }
+        New-TalosNodeConfigFromEnvironment -Config $config -Node $node -Role $entry.Role -ConfigsPath $ConfigsPath | Out-Null
+        Write-TalosSuccess "$($node.hostname).yaml ($($entry.Role), mac $($node.mac))"
+    }
 }
 
 # ─── Summary ─────────────────────────────────────────────────────────────────

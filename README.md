@@ -259,46 +259,51 @@ Prerequisites (in addition to `talosctl`/`kubectl`/`powershell-yaml`):
 
 ### Prepare a new Proxmox node
 
-A freshly installed node (2 NVMe, onboard NIC for management, second NIC for VLANs)
-is brought to standard with:
-
 ```powershell
 .\powershell\Proxmox\Prepare-ProxmoxNode.ps1 -PveHost 10.0.6.21
 ```
 
-It switches to the `pve-no-subscription` repo, enables IOMMU/vfio for GPU passthrough,
-turns the unused NVMe into VM storage (`vmdata`, LVM-thin or `-StorageType zfs`), and
-makes the second NIC (`-NicPciAddress`, default `0000:03:00.0`) a VLAN-aware bridge
-`vmbr1`. It then prompts for VLAN name + ID and creates each as an SDN VNet in zone
-`vlans` — attach VMs to the VNet by name (in `environment.yaml` set `vnet: servers` on a
-Proxmox location instead of `bridge`/`vlan`). Safe to re-run to add more VLANs; reboot
-afterwards for IOMMU. Use `-Skip*` switches to run only some steps.
+Sets up a fresh node: `pve-no-subscription` repo, IOMMU/vfio for GPU passthrough, the free NVMe
+as VM storage (`vmdata`, LVM-thin or `-StorageType zfs`), and the second NIC as a VLAN-aware
+bridge `vmbr1` with a prompt for VLANs (created as SDN VNets in zone `vlans`; use `vnet:` on a
+Proxmox location). Safe to re-run. Reboot afterwards for IOMMU. `-Skip*` runs only some steps.
 
 ### Add / remove / upgrade nodes in a running cluster
 
-Nodes can live on different hypervisors: a node's `location` is looked up in `vmware.locations`
-or `proxmox.locations`. Optional per node: `hostpci: "0000:00:02.0"` passes a PCI device
-(GPU) through to a Proxmox VM.
+A node's `location` is looked up in `vmware.locations` or `proxmox.locations`, so hypervisors can
+be mixed. Optional per node: `hostpci: "0000:00:02.0"` (GPU passthrough on Proxmox).
+
+**The IP is bound to the NIC's MAC, never its name.** After a Talos 1.14 upgrade with the plain
+installer the NIC is `ens18`, not `eth0`; a config selecting `eth0` then matches nothing and the
+node falls back to DHCP. `mac:` per node in `environment.yaml` is the source of truth. A node
+without one gets no config. You do not type it:
+
+- **New Proxmox VM:** deploy creates the VM, reads its MAC, writes `mac:`, generates the config,
+  attaches it, then starts the VM.
+- **Running node:** `Apply-TalosConfig.ps1` reads the MAC from the node and applies without reboot.
+- **Upgrade:** `Upgrade-TalosNodes.ps1` refuses a node whose live config selects the NIC by name.
+
+Proxmox nodes install from `nocloud-installer` (keeps `talos.platform=nocloud`), VMware nodes
+from `vmware-installer`.
 
 ```powershell
-# 1. Add the nodes to environment.yaml, then regenerate per-node configs (reuses the
-#    existing base configs/secrets - never use -RegenBase on a live cluster)
+# 0. Existing nodes, before upgrading: dry run, then apply (-Address if the node is on another IP)
+.\powershell\Apply-TalosConfig.ps1 -EnvironmentFile "...\environment.yaml"
+.\powershell\Apply-TalosConfig.ps1 -EnvironmentFile "...\environment.yaml" -Nodes talos-worker-04 -Apply
+
+# 1. Add nodes to environment.yaml (no mac), then reuse the base config (never -RegenBase on a live cluster)
 .\powershell\Initialize-TalosConfig.ps1 -EnvironmentFile "...\environment.yaml"
 
-# 2. Image + deploy ONLY the new nodes; they join the cluster by themselves
+# 2. Deploy only the new nodes; they join by themselves
 .\powershell\Proxmox\Prepare-TalosImage.ps1 -EnvironmentFile "...\environment.yaml"
 .\powershell\Proxmox\Deploy-TalosCluster.ps1 -EnvironmentFile "...\environment.yaml" -Nodes talos-cp-04,talos-worker-04
 
-# 3. Once the new nodes are Ready (control plane: also an etcd member), remove old ones
+# 3. When they are Ready (control plane: etcd member), remove old nodes, then delete them from environment.yaml
 .\powershell\Remove-TalosNode.ps1 -EnvironmentFile "...\environment.yaml" -Hostname talos-worker-3
-#    then delete the node from environment.yaml
 
-# 4. Rolling upgrade of existing nodes to the schematic in environment.yaml
+# 4. Rolling upgrade to the schematic version in environment.yaml
 .\powershell\Upgrade-TalosNodes.ps1 -EnvironmentFile "...\environment.yaml" -Nodes talos-cp-1
 ```
-
-Machine configs get the right `install.image` per node (plain installer for Proxmox,
-`vmware-installer` for VMware).
 
 Copy `exampleconfigs/environment.proxmox.example.yaml` to your configs folder as
 `environment.yaml` and fill in the `proxmox` section. Then:
@@ -307,7 +312,7 @@ Copy `exampleconfigs/environment.proxmox.example.yaml` to your configs folder as
 # 1. Download the nocloud image onto each Proxmox host
 .\powershell\Proxmox\Prepare-TalosImage.ps1 -EnvironmentFile "C:\path\to\your\configs\environment.yaml"
 
-# 2. Generate machine configs (picks the plain installer image automatically)
+# 2. Generate the base config (per-node configs are made at deploy, when the MAC is known)
 .\powershell\Initialize-TalosConfig.ps1 -EnvironmentFile "C:\path\to\your\configs\environment.yaml"
 
 # 3. Create and start the VMs

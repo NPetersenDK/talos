@@ -58,7 +58,9 @@ function Get-ProxmoxLocation {
 function Deploy-TalosVM {
     param(
         [string]$VMName,
-        [string]$ConfigPath,
+        # The config is generated here, after the VM exists: it needs the VM's MAC.
+        [Parameter(Mandatory)]$Node,
+        [Parameter(Mandatory)][ValidateSet('controlplane', 'worker')][string]$Role,
         [int]$Cores,
         [int]$MemoryGB,
         [int]$DiskGB,
@@ -79,16 +81,34 @@ function Deploy-TalosVM {
         $Vmid = [int](Invoke-ProxmoxSsh -SshHost $pveHost -User $sshUser -Command "pvesh get /cluster/nextid")
     }
 
-    Write-TalosInfo "Uploading machine config snippet"
-    Invoke-ProxmoxSsh -SshHost $pveHost -User $sshUser -Command "mkdir -p '$snippetsPath'" | Out-Null
-    Copy-ProxmoxFile -SshHost $pveHost -User $sshUser -LocalPath $ConfigPath -RemotePath "$snippetsPath/talos-$VMName.yaml"
-
-    $net0 = "virtio,bridge=$($Location.Bridge)"
+    # node.mac is pinned on the VM if set; otherwise Proxmox picks one.
+    $net0 = $(if ($Node.mac) { "virtio=$($Node.mac.ToUpper())" } else { "virtio" }) + ",bridge=$($Location.Bridge)"
     if ($Location.Vlan) { $net0 += ",tag=$($Location.Vlan)" }
     if ($Location.Mtu)  { $net0 += ",mtu=$($Location.Mtu)" }
 
     Write-TalosInfo "Creating VM $Vmid`: $Cores vCPU, ${MemoryGB} GB RAM"
     Invoke-ProxmoxSsh -SshHost $pveHost -User $sshUser -Command "qm create $Vmid --name '$VMName' --machine q35 --bios ovmf --ostype l26 --cpu host --sockets 1 --cores $Cores --memory $($MemoryGB * 1024) --balloon 0 --scsihw virtio-scsi-pci --net0 '$net0' --agent enabled=1 --serial0 socket" | Out-Null
+
+    # The VM has not booted yet but its MAC is fixed: read it, record it in environment.yaml.
+    $qmConfig = (Invoke-ProxmoxSsh -SshHost $pveHost -User $sshUser -Command "qm config $Vmid") -join "`n"
+    $found = [regex]::Match($qmConfig, '(?m)^net0:\s*[A-Za-z0-9_]+=((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})')
+    if (-not $found.Success) {
+        throw "Could not read the MAC of net0 for VM $Vmid from 'qm config'. Output:`n$qmConfig"
+    }
+    $vmMac = $found.Groups[1].Value.ToLower()
+    if ($Node.mac -and $Node.mac.ToLower() -ne $vmMac) {
+        throw "VM $Vmid has MAC $vmMac but environment.yaml says $($Node.mac) for $VMName"
+    }
+    if (-not $Node.mac) {
+        Set-TalosNodeMac -Path $EnvironmentFile -Hostname $Node.hostname -Mac $vmMac
+        $Node['mac'] = $vmMac
+        Write-TalosInfo "MAC $vmMac written to environment.yaml (node.mac)"
+    }
+
+    $ConfigPath = New-TalosNodeConfigFromEnvironment -Config $config -Node $Node -Role $Role -ConfigsPath $ConfigsPath
+    Write-TalosInfo "Uploading machine config snippet (bound to MAC $vmMac)"
+    Invoke-ProxmoxSsh -SshHost $pveHost -User $sshUser -Command "mkdir -p '$snippetsPath'" | Out-Null
+    Copy-ProxmoxFile -SshHost $pveHost -User $sshUser -LocalPath $ConfigPath -RemotePath "$snippetsPath/talos-$VMName.yaml"
 
     # Secure boot disabled (pre-enrolled-keys=0): factory nocloud images are not
     # Microsoft-signed.
@@ -136,10 +156,13 @@ function Deploy-TalosVM {
 # ─── Validate configs ────────────────────────────────────────────────────────
 Write-TalosStep 1 "Validating machine configs"
 
-$machineDir = Join-Path $ConfigsPath "talosfiles" "machineconfigs"
-if (-not (Test-Path $machineDir)) {
-    Write-Error "Machine configs not found: $machineDir`nRun Initialize-TalosConfig.ps1 first"
-    exit 1
+# Per-node configs are made while deploying (they need the VM's MAC); only the base config must exist.
+foreach ($baseName in 'controlplane.yaml', 'worker.yaml') {
+    $basePath = Join-Path $ConfigsPath "talosfiles" $baseName
+    if (-not (Test-Path $basePath)) {
+        Write-Error "Base config not found: $basePath`nRun Initialize-TalosConfig.ps1 first"
+        exit 1
+    }
 }
 
 # Only nodes placed on a Proxmox location (optionally narrowed by -Nodes)
@@ -149,8 +172,8 @@ function Select-ProxmoxNodes {
         ($px.locations.Keys -contains $_.location) -and ($Nodes.Count -eq 0 -or $Nodes -contains $_.hostname)
     })
 }
-$cpTargets = Select-ProxmoxNodes $config.cluster.controlplane.nodes
-$wTargets  = Select-ProxmoxNodes $config.cluster.worker.nodes
+$cpTargets = @(Select-ProxmoxNodes $config.cluster.controlplane.nodes)
+$wTargets  = @(Select-ProxmoxNodes $config.cluster.worker.nodes)
 $allNodes  = @($cpTargets) + @($wTargets)
 
 $unknown = $Nodes | Where-Object { $_ -notin @($allNodes | ForEach-Object { $_.hostname }) }
@@ -165,12 +188,7 @@ if ($allNodes.Count -eq 0) {
 Write-TalosInfo "Deploying: $(($allNodes | ForEach-Object { $_.hostname }) -join ', ')"
 
 foreach ($node in $allNodes) {
-    $nodeCfg = Join-Path $machineDir "$($node.hostname).yaml"
-    if (-not (Test-Path $nodeCfg)) {
-        Write-Error "Missing config: $nodeCfg`nRun Initialize-TalosConfig.ps1 first"
-        exit 1
-    }
-    Write-TalosSuccess "$($node.hostname).yaml"
+    Write-TalosSuccess "$($node.hostname): $(if ($node.mac) { "mac $($node.mac) (pinned on the VM)" } else { 'mac will be read from the new VM' })"
 }
 
 # ─── Pre-flight check ────────────────────────────────────────────────────────
@@ -209,12 +227,11 @@ $cp = $config.cluster.controlplane
 foreach ($node in $cpTargets) {
     $vmName     = $node.hostname
     $loc        = Get-ProxmoxLocation -Key $node.location
-    $nodeConfig = Join-Path $machineDir "$($node.hostname).yaml"
 
     Write-Host ""
     Write-TalosInfo "$vmName  ip=$($node.ip)  location=$($node.location)"
 
-    $vmid = Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -Cores $cp.cpu -MemoryGB $cp.memoryGB -DiskGB $cp.diskGB -Location $loc -Vmid ([int]($node.vmid ?? 0)) -HostPci $node.hostpci
+    $vmid = Deploy-TalosVM -VMName $vmName -Node $node -Role controlplane -Cores $cp.cpu -MemoryGB $cp.memoryGB -DiskGB $cp.diskGB -Location $loc -Vmid ([int]($node.vmid ?? 0)) -HostPci $node.hostpci
 
     Write-TalosSuccess "$vmName deployed (VMID $vmid)"
     $createdVMs += "$vmName ($($node.ip), VMID $vmid)"
@@ -227,7 +244,6 @@ $w = $config.cluster.worker
 foreach ($node in $wTargets) {
     $vmName     = $node.hostname
     $loc        = Get-ProxmoxLocation -Key $node.location
-    $nodeConfig = Join-Path $machineDir "$($node.hostname).yaml"
 
     Write-Host ""
     Write-TalosInfo "$vmName  ip=$($node.ip)  location=$($node.location)"
@@ -241,7 +257,7 @@ foreach ($node in $wTargets) {
         $dataDisksGB = @([int]$w.dataDiskGB)
     }
 
-    $vmid = Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -Cores $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB -DataDisksGB $dataDisksGB -Location $loc -Vmid ([int]($node.vmid ?? 0)) -HostPci $node.hostpci
+    $vmid = Deploy-TalosVM -VMName $vmName -Node $node -Role worker -Cores $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB -DataDisksGB $dataDisksGB -Location $loc -Vmid ([int]($node.vmid ?? 0)) -HostPci $node.hostpci
 
     Write-TalosSuccess "$vmName deployed (VMID $vmid)"
     $createdVMs += "$vmName ($($node.ip), VMID $vmid)"
