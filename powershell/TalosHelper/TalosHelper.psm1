@@ -131,12 +131,17 @@ function Get-TalosNodeMacLive {
         [Parameter(Mandatory)][string]$Address
     )
 
-    $out = & talosctl --talosconfig $TalosConfig -e $Address -n $Address get links -o json 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "talosctl get links failed on ${Address}: $($out -join ' ')" }
+    $all = & talosctl --talosconfig $TalosConfig -e $Address -n $Address get links -o json 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "talosctl get links failed on ${Address}: $($all -join ' ')" }
 
-    # talosctl prints one JSON object per resource, not an array.
-    $text  = ($out | Out-String).Trim()
-    $links = ('[' + ($text -replace '\}\s*\{', '},{') + ']') | ConvertFrom-Json
+    # Only stdout is JSON; stderr carries warnings (e.g. client/server version skew).
+    $stdout = @($all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+    $text   = ($stdout | Out-String).Trim()
+    $first  = $text.IndexOf('{')
+    if ($first -lt 0) { throw "talosctl get links on $Address returned no JSON: $text" }
+
+    # One JSON object per resource, not an array.
+    $links = ('[' + ($text.Substring($first) -replace '\}\s*\{', '},{') + ']') | ConvertFrom-Json
 
     $candidates = @($links | Where-Object {
         $_.spec.type -eq 'ether' -and [string]::IsNullOrEmpty($_.spec.kind) -and $_.spec.hardwareAddr
