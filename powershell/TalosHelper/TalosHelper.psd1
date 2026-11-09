@@ -11,6 +11,7 @@
         'Invoke-ProxmoxSsh',
         'Copy-ProxmoxFile',
         'New-TalosNodeConfig',
+        'Get-TalosInstallerImage',
         'Write-TalosBanner',
         'Write-TalosStep',
         'Write-TalosSuccess',

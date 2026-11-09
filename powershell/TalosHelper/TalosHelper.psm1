@@ -62,6 +62,20 @@ function Connect-TalosVCenter {
     return Connect-VIServer -Server $Server
 }
 
+# Installer image for a node: Proxmox (nocloud) nodes use the plain installer,
+# VMware nodes the vmware-installer variant. A node is a Proxmox node when its
+# location is defined under proxmox.locations.
+function Get-TalosInstallerImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)]$Node
+    )
+    $isProxmox = $Config.proxmox -and $Config.proxmox.locations -and ($Config.proxmox.locations.Keys -contains $Node.location)
+    if ($isProxmox) { return $Config.schematic.installerImage }
+    return $Config.schematic.vmwareInstallerImage
+}
+
 # Sessions and credential are cached for the lifetime of the module (one
 # password prompt per script run, one connection per host).
 $script:ProxmoxCredential  = $null
@@ -199,6 +213,10 @@ function New-TalosNodeConfig {
         [int]$Mtu = 0,
         [string]$VIP = $null,
         [string]$OutputPath = $null,
+        # Overrides machine.install.image (installer used for upgrades/reinstalls).
+        # Needed when the base config carries a different installer than this node
+        # should use (e.g. Proxmox nodes in a cluster whose base config is VMware).
+        [string]$InstallImage = $null,
         # Optional storage config (from environment.yaml cluster.worker.storage)
         # Preferred: hashtable with key 'datadisks' -> array of @{ sizeGB; mountpoint },
         # one VMware disk per entry (/dev/sdb, /dev/sdc, ...).
@@ -305,6 +323,10 @@ function New-TalosNodeConfig {
         }
     }
 
+    if ($InstallImage) {
+        $machine['install'] = @{ image = $InstallImage }
+    }
+
     $patch = @{
         machine = $machine
         cluster = @{
@@ -346,4 +368,4 @@ function New-TalosNodeConfig {
 Export-ModuleMember -Function Get-TalosEnvironment, Connect-TalosVCenter,
     Invoke-ProxmoxSsh, Copy-ProxmoxFile,
     Write-TalosBanner, Write-TalosStep, Write-TalosSuccess, Write-TalosWarn,
-    Write-TalosInfo, Write-TalosSummary, New-TalosNodeConfig
+    Write-TalosInfo, Write-TalosSummary, New-TalosNodeConfig, Get-TalosInstallerImage

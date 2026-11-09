@@ -3,7 +3,12 @@ param(
     # Path to your environment yaml file (e.g. C:\configs\environment.yaml).
     # Machine configs are read from talosfiles/ next to it.
     [Parameter(Mandatory)]
-    [string]$EnvironmentFile
+    [string]$EnvironmentFile,
+
+    # Only deploy these hostnames (e.g. to add nodes to an existing cluster).
+    # Default: every node whose location is defined under proxmox.locations.
+    # Nodes on other hypervisors (vmware.locations) are always skipped.
+    [string[]]$Nodes = @()
 )
 
 Import-Module (Join-Path $PSScriptRoot ".." "TalosHelper") -Force
@@ -41,8 +46,9 @@ function Get-ProxmoxLocation {
         $locationCache[$Key] = @{
             Host    = $loc.host
             Storage = $loc.storage
-            Bridge  = $loc.bridge
-            Vlan    = $loc.vlan
+            # 'vnet' (SDN VNet from Prepare-ProxmoxNode.ps1) replaces bridge + vlan
+            Bridge  = if ($loc.vnet) { $loc.vnet } else { $loc.bridge }
+            Vlan    = if ($loc.vnet) { $null } else { $loc.vlan }
             Mtu     = $loc.mtu
         }
     }
@@ -61,7 +67,9 @@ function Deploy-TalosVM {
         # scsi0 = /dev/sda, scsi1 = /dev/sdb, ...).
         [int[]]$DataDisksGB = @(),
         [hashtable]$Location,
-        [int]$Vmid
+        [int]$Vmid,
+        # PCI address on the Proxmox host to pass through (e.g. 0000:00:02.0).
+        [string]$HostPci
     )
 
     $pveHost = $Location.Host
@@ -114,6 +122,11 @@ function Deploy-TalosVM {
 
     Invoke-ProxmoxSsh -SshHost $pveHost -User $sshUser -Command "qm set $Vmid --boot order=scsi0" | Out-Null
 
+    if ($HostPci) {
+        Write-TalosInfo "Passing through PCI device $HostPci"
+        Invoke-ProxmoxSsh -SshHost $pveHost -User $sshUser -Command "qm set $Vmid --hostpci0 '$HostPci,pcie=1'" | Out-Null
+    }
+
     Write-TalosInfo "Powering on $VMName (VMID $Vmid)"
     Invoke-ProxmoxSsh -SshHost $pveHost -User $sshUser -Command "qm start $Vmid" | Out-Null
 
@@ -129,10 +142,28 @@ if (-not (Test-Path $machineDir)) {
     exit 1
 }
 
-$allNodes = @(
-    $config.cluster.controlplane.nodes
-    $config.cluster.worker.nodes
-)
+# Only nodes placed on a Proxmox location (optionally narrowed by -Nodes)
+function Select-ProxmoxNodes {
+    param($NodeList)
+    @($NodeList | Where-Object {
+        ($px.locations.Keys -contains $_.location) -and ($Nodes.Count -eq 0 -or $Nodes -contains $_.hostname)
+    })
+}
+$cpTargets = Select-ProxmoxNodes $config.cluster.controlplane.nodes
+$wTargets  = Select-ProxmoxNodes $config.cluster.worker.nodes
+$allNodes  = @($cpTargets) + @($wTargets)
+
+$unknown = $Nodes | Where-Object { $_ -notin @($allNodes | ForEach-Object { $_.hostname }) }
+if ($unknown) {
+    Write-Error "Not found as Proxmox nodes in environment.yaml: $($unknown -join ', ')"
+    exit 1
+}
+if ($allNodes.Count -eq 0) {
+    Write-Error "No nodes to deploy: none have a location under proxmox.locations"
+    exit 1
+}
+Write-TalosInfo "Deploying: $(($allNodes | ForEach-Object { $_.hostname }) -join ', ')"
+
 foreach ($node in $allNodes) {
     $nodeCfg = Join-Path $machineDir "$($node.hostname).yaml"
     if (-not (Test-Path $nodeCfg)) {
@@ -175,7 +206,7 @@ $createdVMs = @()
 Write-TalosStep 3 "Deploying control plane nodes"
 
 $cp = $config.cluster.controlplane
-foreach ($node in $cp.nodes) {
+foreach ($node in $cpTargets) {
     $vmName     = $node.hostname
     $loc        = Get-ProxmoxLocation -Key $node.location
     $nodeConfig = Join-Path $machineDir "$($node.hostname).yaml"
@@ -183,7 +214,7 @@ foreach ($node in $cp.nodes) {
     Write-Host ""
     Write-TalosInfo "$vmName  ip=$($node.ip)  location=$($node.location)"
 
-    $vmid = Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -Cores $cp.cpu -MemoryGB $cp.memoryGB -DiskGB $cp.diskGB -Location $loc -Vmid ([int]($node.vmid ?? 0))
+    $vmid = Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -Cores $cp.cpu -MemoryGB $cp.memoryGB -DiskGB $cp.diskGB -Location $loc -Vmid ([int]($node.vmid ?? 0)) -HostPci $node.hostpci
 
     Write-TalosSuccess "$vmName deployed (VMID $vmid)"
     $createdVMs += "$vmName ($($node.ip), VMID $vmid)"
@@ -193,7 +224,7 @@ foreach ($node in $cp.nodes) {
 Write-TalosStep 4 "Deploying worker nodes"
 
 $w = $config.cluster.worker
-foreach ($node in $w.nodes) {
+foreach ($node in $wTargets) {
     $vmName     = $node.hostname
     $loc        = Get-ProxmoxLocation -Key $node.location
     $nodeConfig = Join-Path $machineDir "$($node.hostname).yaml"
@@ -210,7 +241,7 @@ foreach ($node in $w.nodes) {
         $dataDisksGB = @([int]$w.dataDiskGB)
     }
 
-    $vmid = Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -Cores $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB -DataDisksGB $dataDisksGB -Location $loc -Vmid ([int]($node.vmid ?? 0))
+    $vmid = Deploy-TalosVM -VMName $vmName -ConfigPath $nodeConfig -Cores $w.cpu -MemoryGB $w.memoryGB -DiskGB $w.diskGB -DataDisksGB $dataDisksGB -Location $loc -Vmid ([int]($node.vmid ?? 0)) -HostPci $node.hostpci
 
     Write-TalosSuccess "$vmName deployed (VMID $vmid)"
     $createdVMs += "$vmName ($($node.ip), VMID $vmid)"
@@ -220,6 +251,6 @@ foreach ($node in $w.nodes) {
 $summaryLines = @("VMs created and powered on:")
 $summaryLines += $createdVMs | ForEach-Object { "  $_" }
 $summaryLines += ""
-$summaryLines += "Next: Bootstrap-TalosCluster.ps1"
+$summaryLines += $(if ($Nodes.Count -gt 0) { "Nodes join the existing cluster on their own - watch: kubectl get nodes -w" } else { "Next: Bootstrap-TalosCluster.ps1" })
 
 Write-TalosSummary "Cluster Deployed" $summaryLines
