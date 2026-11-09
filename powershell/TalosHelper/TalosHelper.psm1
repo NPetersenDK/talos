@@ -17,8 +17,12 @@ function Get-TalosEnvironment {
     $raw = Get-Content -Path $Path -Raw
     $config = ConvertFrom-Yaml $raw
 
+    # VMware nodes can use their own schematic (schematic.vmwareId): qemu-guest-agent has no
+    # virtio port there and holds boot at "Booting". Default: the same id as everywhere else.
+    $vmwareId = if ($config['schematic']['vmwareId']) { $config['schematic']['vmwareId'] } else { $config['schematic']['id'] }
+
     # Derive OVA URL from schematic ID and version
-    $config['schematic']['ovaUrl'] = "https://factory.talos.dev/image/$($config['schematic']['id'])/$($config['schematic']['version'])/vmware-amd64.ova"
+    $config['schematic']['ovaUrl'] = "https://factory.talos.dev/image/$vmwareId/$($config['schematic']['version'])/vmware-amd64.ova"
 
     # Derive installer image for upgrades
     $config['schematic']['installerImage'] = "factory.talos.dev/installer/$($config['schematic']['id']):$($config['schematic']['version'])"
@@ -27,10 +31,10 @@ function Get-TalosEnvironment {
     $config['schematic']['nocloudInstallerImage'] = "factory.talos.dev/nocloud-installer/$($config['schematic']['id']):$($config['schematic']['version'])"
 
     # Derive VMware installer image for gen config
-    $config['schematic']['vmwareInstallerImage'] = "factory.talos.dev/vmware-installer/$($config['schematic']['id']):$($config['schematic']['version'])"
+    $config['schematic']['vmwareInstallerImage'] = "factory.talos.dev/vmware-installer/$vmwareId`:$($config['schematic']['version'])"
 
     # Derive library item name from version + schematic ID
-    $config['schematic']['libraryItemName'] = "talos-$($config['schematic']['version'])-$($config['schematic']['id'])"
+    $config['schematic']['libraryItemName'] = "talos-$($config['schematic']['version'])-$vmwareId"
 
     # Derive Proxmox (nocloud) image URL and cached filename on the Proxmox node
     $config['schematic']['nocloudImageUrl'] = "https://factory.talos.dev/image/$($config['schematic']['id'])/$($config['schematic']['version'])/nocloud-amd64.raw.xz"
